@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: parser
+  datasource:
+    url: jdbc:postgresql://localhost:5432/NeuroIndex
+    username: postgres
+    password: Thakur@7
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+
+    show-sql: true
+
+    properties:
+      hibernate:
+        format_sql: true
+
+  sql:
+    init:
+      mode: always
