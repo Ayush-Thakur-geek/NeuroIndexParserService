@@ -1,16 +1,19 @@
 package com.NeuroIndex.parser.service.impl;
 
+import com.NeuroIndex.entity.enums.LlmTypes;
 import com.NeuroIndex.entity.models.AffiliatedEmail;
 import com.NeuroIndex.entity.models.LLm;
 import com.NeuroIndex.entity.models.User;
 import com.NeuroIndex.parser.dtos.ExtractionFileDTO;
 import com.NeuroIndex.parser.dtos.UserJsonDTO;
+import com.NeuroIndex.parser.exception.CustomException;
 import com.NeuroIndex.parser.repositories.AffiliatedEmailsRepo;
 import com.NeuroIndex.parser.repositories.LlmsRepo;
 import com.NeuroIndex.parser.repositories.ProjectConversationDocsRepo;
 import com.NeuroIndex.parser.repositories.UserRepo;
-import com.NeuroIndex.parser.service.UserFileIngestionService;
+import com.NeuroIndex.parser.service.ExportFileIngestionService;
 import lombok.extern.log4j.Log4j2;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import tools.jackson.core.type.TypeReference;
@@ -22,7 +25,7 @@ import java.util.List;
 
 @Service
 @Log4j2
-public class UserFileIngestionServiceImpl implements UserFileIngestionService {
+public class ExportFileIngestionServiceImpl implements ExportFileIngestionService {
 
     private final UserRepo userRepo;
     private final AffiliatedEmailsRepo affiliatedEmailsRepo;
@@ -30,11 +33,11 @@ public class UserFileIngestionServiceImpl implements UserFileIngestionService {
     private final ProjectConversationDocsRepo projectConversationDocsRepo;
     private final ObjectMapper objectMapper;
 
-    public UserFileIngestionServiceImpl(UserRepo userRepo,
-                                        AffiliatedEmailsRepo affiliatedEmailsRepo,
-                                        LlmsRepo llmsRepo,
-                                        ProjectConversationDocsRepo projectConversationDocsRepo,
-                                        ObjectMapper objectMapper) {
+    public ExportFileIngestionServiceImpl(UserRepo userRepo,
+                                          AffiliatedEmailsRepo affiliatedEmailsRepo,
+                                          LlmsRepo llmsRepo,
+                                          ProjectConversationDocsRepo projectConversationDocsRepo,
+                                          ObjectMapper objectMapper) {
         this.userRepo = userRepo;
         this.affiliatedEmailsRepo = affiliatedEmailsRepo;
         this.llmsRepo = llmsRepo;
@@ -42,9 +45,9 @@ public class UserFileIngestionServiceImpl implements UserFileIngestionService {
         this.objectMapper = objectMapper;
     }
     @Override
-    public void extractInfo(ExtractionFileDTO extractionFileDTO) throws IOException {
+    public void extractUserInfo(ExtractionFileDTO extractionFileDTO) throws IOException {
         User user = userRepo.getUserByEmail(extractionFileDTO.getEmail());
-        MultipartFile multipartFile = extractionFileDTO.getUserJson();
+        MultipartFile multipartFile = extractionFileDTO.getJsonFile();
         if (user == null) {
             throw new RuntimeException("User not found");
         }
@@ -62,6 +65,7 @@ public class UserFileIngestionServiceImpl implements UserFileIngestionService {
                                     .trim()
                                     .toLowerCase()
                     )
+                    .uuid(userJsonDTO.getUuid())
                     .build();
             List<AffiliatedEmail> affiliatedEmailList =  new ArrayList<>();
             affiliatedEmailList.add(affiliatedEmail);
@@ -79,5 +83,27 @@ public class UserFileIngestionServiceImpl implements UserFileIngestionService {
         } else {
             log.info("File is empty");
         }
+    }
+
+    @Override
+    public void parseConversationExportFile(ExtractionFileDTO extractionFileDTO) throws IOException {
+        User user = userRepo.getUserByEmail(extractionFileDTO.getEmail());
+        MultipartFile jsonFile = extractionFileDTO.getJsonFile();
+        LlmTypes llmType = extractionFileDTO.getLlmTypes();
+        if (llmType == LlmTypes.CLAUDE) {
+            log.info("Claude parsing for file: {}", jsonFile.getOriginalFilename());
+            parsingClaudeConversationFile(user, jsonFile);
+        } else if (llmType == LlmTypes.CHAT_GPT) {
+            log.info("Chat_gpt parsing for file: {}", jsonFile.getOriginalFilename());
+        } else {
+            log.info("Gemini parsing for file: {}", jsonFile.getOriginalFilename());
+        }
+    }
+
+    private void parsingClaudeConversationFile(
+            User user,
+            MultipartFile jsonFile
+    ) throws IOException {
+
     }
 }

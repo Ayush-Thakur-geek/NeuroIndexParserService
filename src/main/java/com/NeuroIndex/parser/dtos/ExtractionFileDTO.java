@@ -12,5 +12,5 @@ import org.springframework.web.multipart.MultipartFile;
 public class ExtractionFileDTO {
     public String email;
     public LlmTypes llmTypes;
-    public MultipartFile userJson;
+    public MultipartFile jsonFile;
 }
