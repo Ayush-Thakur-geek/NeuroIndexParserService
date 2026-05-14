@@ -1,7 +1,7 @@
 package com.NeuroIndex.parser.controller;
 
 import com.NeuroIndex.parser.dtos.ExtractionFileDTO;
-import com.NeuroIndex.parser.service.UserFileIngestionService;
+import com.NeuroIndex.parser.service.ExportFileIngestionService;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -12,12 +12,12 @@ import java.io.IOException;
 @RequestMapping("/beta/v1/extract-file-ingestion")
 public class ExtractFileIngestionController {
 
-    private final UserFileIngestionService userFileIngestionService;
+    private final ExportFileIngestionService exportFileIngestionService;
 
     public ExtractFileIngestionController(
-            UserFileIngestionService userFileIngestionService
+            ExportFileIngestionService exportFileIngestionService
     ) {
-        this.userFileIngestionService = userFileIngestionService;
+        this.exportFileIngestionService = exportFileIngestionService;
     }
 
     @PostMapping(
@@ -30,12 +30,28 @@ public class ExtractFileIngestionController {
 
         try {
 
-            userFileIngestionService.extractInfo(extractionFileDTO);
+            exportFileIngestionService.extractUserInfo(extractionFileDTO);
 
             return ResponseEntity.ok().build();
 
         } catch (IOException e) {
 
+            throw new RuntimeException(e);
+        }
+    }
+
+    @PostMapping(
+            value = "/conversation-file",
+            consumes = MediaType.MULTIPART_FORM_DATA_VALUE
+    )
+    public ResponseEntity<String> conversationFileIngestion(
+            @ModelAttribute ExtractionFileDTO extractionFileDTO
+    ) {
+        try {
+
+            exportFileIngestionService.parseConversationExportFile(extractionFileDTO);
+            return ResponseEntity.ok().build();
+        } catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
