@@ -4,6 +4,7 @@ import com.NeuroIndex.entity.enums.LlmTypes;
 import com.NeuroIndex.entity.models.AffiliatedEmail;
 import com.NeuroIndex.entity.models.LLm;
 import com.NeuroIndex.entity.models.User;
+import com.NeuroIndex.parser.dtos.ClaudeConversationJsonDTO;
 import com.NeuroIndex.parser.dtos.ExtractionFileDTO;
 import com.NeuroIndex.parser.dtos.UserJsonDTO;
 import com.NeuroIndex.parser.exception.CustomException;
@@ -13,15 +14,16 @@ import com.NeuroIndex.parser.repositories.ProjectConversationDocsRepo;
 import com.NeuroIndex.parser.repositories.UserRepo;
 import com.NeuroIndex.parser.service.ExportFileIngestionService;
 import lombok.extern.log4j.Log4j2;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.MappingIterator;
 import tools.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 @Service
 @Log4j2
@@ -105,5 +107,103 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
             MultipartFile jsonFile
     ) throws IOException {
 
+        try {
+
+            MappingIterator<ClaudeConversationJsonDTO> iterator = objectMapper
+                    .readerFor(ClaudeConversationJsonDTO.class)
+                    .readValues(jsonFile.getInputStream());
+
+            List<ClaudeConversationJsonDTO> batch = new ArrayList<>();
+
+            String accountUuid = null;
+
+            LLm llm = null;
+
+            AffiliatedEmail affiliatedEmail = null;
+
+            while (iterator.hasNext()) {
+
+                batch.add(iterator.next());
+
+                if (batch.size() == 20 || !iterator.hasNext()) {
+
+                    if (affiliatedEmail == null) {
+
+                        ClaudeConversationJsonDTO claudeConversationJsonDTO = batch
+                                .stream()
+                                .filter(dto ->
+                                        dto.getAccount() != null
+                                                && dto.getAccount().getUuid() != null
+                                )
+                                .findFirst()
+                                .orElse(null);
+
+                        if (claudeConversationJsonDTO == null) {
+
+                            batch.clear();
+
+                            continue;
+                        }
+
+                        accountUuid = claudeConversationJsonDTO
+                                .getAccount()
+                                .getUuid();
+
+                        affiliatedEmail = affiliatedEmailsRepo.findByUuid(accountUuid);
+
+                        if (affiliatedEmail == null) {
+
+                            throw new CustomException(
+                                    "Conversation export does not belong to known affiliated account",
+                                    "ACCOUNT_IDENTITY_MISMATCH",
+                                    400
+                            );
+                        }
+
+                        llm = llmsRepo.findByAffiliatedEmailObject(affiliatedEmail);
+
+                        if (llm == null) {
+
+                            throw new CustomException(
+                                    "Linked llm provider not found",
+                                    "LINKED_PROVIDER_NOT_FOUND",
+                                    404
+                            );
+                        }
+                    }
+
+                    log.info(
+                            "Testing the claude parsing method: {}",
+                            embeddingCreation(
+                                    LlmTypes.CLAUDE,
+                                    affiliatedEmail,
+                                    batch
+                            )
+                    );
+
+                    batch.clear();
+                }
+            }
+
+        } catch (CustomException e) {
+            throw e;
+        } catch (Exception e) {
+
+            log.error("Claude parsing failed", e);
+
+            throw new CustomException(
+                    e.getMessage(),
+                    "INVALID_PROVIDER_EXPORT",
+                    400
+            );
+        }
+    }
+
+    private String embeddingCreation(
+            LlmTypes llmType,
+            AffiliatedEmail affiliatedEmail,
+            List<ClaudeConversationJsonDTO> claudeConversationJsonDTOList
+    ) {
+        return "test";
     }
 }
