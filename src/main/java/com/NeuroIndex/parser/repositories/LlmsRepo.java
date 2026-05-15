@@ -1,5 +1,6 @@
 package com.NeuroIndex.parser.repositories;
 
+import com.NeuroIndex.entity.models.AffiliatedEmail;
 import com.NeuroIndex.entity.models.LLm;
 import com.NeuroIndex.entity.models.User;
 import org.springframework.data.domain.Pageable;
@@ -18,5 +19,15 @@ public interface LlmsRepo extends JpaRepository<LLm, Long> {
             WHERE l.user = :user
             ORDER BY l.createdDate DESC
             """)
-    List<LLm> findLatestLlmByUser(@Param("user") User userm, Pageable pageable);
+    List<LLm> findLatestLlmByUser(@Param("user") User user, Pageable pageable);
+
+    @Query("""
+        SELECT l
+        FROM LLm l
+        WHERE :affiliatedEmail MEMBER OF l.affiliatedEmails
+        """)
+    LLm findByAffiliatedEmailObject(
+            @Param("affiliatedEmail")
+            AffiliatedEmail affiliatedEmail
+    );
 }

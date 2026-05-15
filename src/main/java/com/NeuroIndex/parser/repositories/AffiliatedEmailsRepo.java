@@ -20,4 +20,6 @@ public interface AffiliatedEmailsRepo extends JpaRepository<AffiliatedEmail, Lon
             ORDER BY a.createdDate DESC
             """)
     List<AffiliatedEmail> findLatestEmailByLlm(@Param("llm") LLm llm, Pageable pageable);
+
+    AffiliatedEmail findByUuid(String uuid);
 }
