@@ -1,9 +1,10 @@
 package com.NeuroIndex.parser.repositories;
 
-import com.NeuroIndex.entity.models.ProjectConversationDoc;
+import com.NeuroIndex.entity.models.Message;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
 @Repository
-public interface ProjectConversationDocsRepo extends JpaRepository<ProjectConversationDoc,Long> {
+public interface MessageRepo extends JpaRepository<Message, Long> {
+
 }
