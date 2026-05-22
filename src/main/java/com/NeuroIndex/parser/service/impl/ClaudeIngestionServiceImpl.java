@@ -12,15 +12,18 @@ import com.NeuroIndex.parser.service.ClaudeIngestionService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.transaction.Transactional;
+import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 @Service
+@Log4j2
 public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
 
     private final ConversationRepo conversationRepo;
@@ -49,12 +52,10 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
 
         for (ClaudeConversationJsonDTO dto : conversationsDTO) {
 
-            String conversationHash =
-                    hashConversation(dto);
+            String conversationHash = hashConversation(dto);
 
             boolean exists =
-                    this.conversationRepo
-                            .existsByHash(conversationHash);
+                    conversationRepo.existsByHash(conversationHash);
 
             if (exists) {
                 continue;
@@ -67,11 +68,22 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                             conversationHash
                     );
 
-            List<Message> messages = new ArrayList<>();
+            List<Message> messages;
+
             try {
-                 messages = buildMessages(dto, conversation);
-            } catch (JsonProcessingException e) {
-                throw new CustomException(e.getMessage(), "FAILING_RAW_JSON_CONVERSION", 500);
+
+                messages = buildMessages(
+                        dto,
+                        conversation
+                );
+
+            } catch (Exception e) {
+
+                throw new CustomException(
+                        e.getMessage(),
+                        "CLAUDE_MESSAGE_INGESTION_FAILED",
+                        500
+                );
             }
 
             conversation.setMessages(messages);
@@ -109,7 +121,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         List<ClaudeConversationJsonDTO.ChatMessage> chatMessages =
                 dto.getChatMessages();
 
-        if (chatMessages == null) {
+        if (chatMessages == null || chatMessages.isEmpty()) {
             return messages;
         }
 
@@ -117,27 +129,19 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
 
         for (ClaudeConversationJsonDTO.ChatMessage chatMessage : chatMessages) {
 
-            String prompt =
-                    normalizeContent(
-                            chatMessage.getText()
-                    );
-
             List<ClaudeConversationJsonDTO.Content> contents =
                     chatMessage.getContent();
 
-            if ((prompt == null || prompt.isBlank())
-                    && (contents == null || contents.isEmpty())) {
+            if (contents == null || contents.isEmpty()) {
                 continue;
             }
 
-            String assistantContent =
-                    extractSemanticText(contents);
-
             String semanticContent =
-                    buildSemanticContent(
-                            prompt,
-                            assistantContent
-                    );
+                    extractSemanticContent(contents);
+
+            if (semanticContent.isBlank()) {
+                continue;
+            }
 
             String rawJson =
                     objectMapper.writeValueAsString(contents);
@@ -147,6 +151,10 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                             chatMessage.getSender(),
                             semanticContent
                     );
+
+            if (messageRepo.existsByHash(messageHash)) {
+                log.info("ALERT! hash clash for sequence: {}", sequence);
+            }
 
             Message message = Message.builder()
                     .conversation(conversation)
@@ -163,13 +171,9 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         return messages;
     }
 
-    private String extractSemanticText(
+    private String extractSemanticContent(
             List<ClaudeConversationJsonDTO.Content> contents
     ) {
-
-        if (contents == null || contents.isEmpty()) {
-            return "";
-        }
 
         StringBuilder builder = new StringBuilder();
 
@@ -179,48 +183,70 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                 continue;
             }
 
-            if ("text".equals(content.getType())
-                    && content.getText() != null) {
+            String type = content.getType();
 
-                builder.append(content.getText())
-                        .append("\n\n");
+            switch (type) {
+
+                case "text" -> {
+
+                    if (content.getText() != null) {
+
+                        builder.append(content.getText())
+                                .append("\n\n");
+                    }
+                }
+
+                case "thinking" -> {
+
+                    if (content.getThinking() != null) {
+
+                        builder.append(content.getThinking())
+                                .append("\n\n");
+                    }
+                }
+
+//                case "tool_result" -> {
+//
+//                    if (content.getContent() != null) {
+//
+//                        for (JsonNode node : content.getContent()) {
+//
+//                            if (node.has("text")) {
+//
+//                                builder.append(
+//                                                node.get("text").asText()
+//                                        )
+//                                        .append("\n\n");
+//                            }
+//                        }
+//                    }
+//                }
+
+                case "tool_use" -> {
+
+                    if (content.getName() != null) {
+
+                        builder.append("Tool Used: ")
+                                .append(content.getName())
+                                .append("\n\n");
+                    }
+
+                    if (content.getMessage() != null) {
+
+                        builder.append(content.getMessage())
+                                .append("\n\n");
+                    }
+                }
+
+                default -> {
+
+                    if (content.getText() != null) {
+
+                        builder.append(content.getText())
+                                .append("\n\n");
+                    }
+                }
             }
-
-            if (content.getThinking() != null) {
-
-                builder.append(content.getThinking())
-                        .append("\n\n");
-            }
-
-            if (content.getMessage() != null) {
-
-                builder.append(content.getMessage())
-                        .append("\n\n");
-            }
-        }
-
-        return normalizeContent(builder.toString());
-    }
-
-    private String buildSemanticContent(
-            String prompt,
-            String assistantContent
-    ) {
-
-        StringBuilder builder = new StringBuilder();
-
-        if (prompt != null && !prompt.isBlank()) {
-
-            builder.append("USER:\n")
-                    .append(prompt)
-                    .append("\n\n");
-        }
-
-        if (assistantContent != null
-                && !assistantContent.isBlank()) {
-
-            builder.append("ASSISTANT:\n")
-                    .append(assistantContent);
         }
 
         return normalizeContent(builder.toString());
@@ -238,6 +264,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
             return sha256(normalized);
 
         } catch (Exception e) {
+
             throw new RuntimeException(e);
         }
     }
@@ -257,7 +284,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     ) {
 
         if (text == null) {
-            return null;
+            return "";
         }
 
         return text
@@ -283,6 +310,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                     new StringBuilder();
 
             for (byte b : hash) {
+
                 builder.append(
                         String.format("%02x", b)
                 );
@@ -291,6 +319,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
             return builder.toString();
 
         } catch (Exception e) {
+
             throw new RuntimeException(e);
         }
     }

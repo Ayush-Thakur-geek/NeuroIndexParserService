@@ -7,4 +7,5 @@ import org.springframework.stereotype.Repository;
 @Repository
 public interface MessageRepo extends JpaRepository<Message, Long> {
 
+    boolean existsByHash(String messageHash);
 }
