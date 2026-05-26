@@ -2,28 +2,31 @@ package com.NeuroIndex.parser.service.impl;
 
 import com.NeuroIndex.entity.enums.LlmTypes;
 import com.NeuroIndex.entity.models.AffiliatedEmail;
+import com.NeuroIndex.entity.models.Conversation;
 import com.NeuroIndex.entity.models.LLm;
 import com.NeuroIndex.entity.models.User;
+import com.NeuroIndex.parser.config.ExecutorServiceConfig;
 import com.NeuroIndex.parser.dtos.ClaudeConversationJsonDTO;
 import com.NeuroIndex.parser.dtos.ExtractionFileDTO;
 import com.NeuroIndex.parser.dtos.UserJsonDTO;
 import com.NeuroIndex.parser.exception.CustomException;
 import com.NeuroIndex.parser.repositories.AffiliatedEmailsRepo;
 import com.NeuroIndex.parser.repositories.LlmsRepo;
-import com.NeuroIndex.parser.repositories.ProjectConversationDocsRepo;
 import com.NeuroIndex.parser.repositories.UserRepo;
+import com.NeuroIndex.parser.service.ClaudeIngestionService;
 import com.NeuroIndex.parser.service.ExportFileIngestionService;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
-import tools.jackson.core.type.TypeReference;
-import tools.jackson.databind.MappingIterator;
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ExecutorService;
 
 @Service
 @Log4j2
@@ -32,19 +35,19 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
     private final UserRepo userRepo;
     private final AffiliatedEmailsRepo affiliatedEmailsRepo;
     private final LlmsRepo llmsRepo;
-    private final ProjectConversationDocsRepo projectConversationDocsRepo;
     private final ObjectMapper objectMapper;
+    private final ClaudeIngestionService claudeIngestionService;
 
     public ExportFileIngestionServiceImpl(UserRepo userRepo,
                                           AffiliatedEmailsRepo affiliatedEmailsRepo,
                                           LlmsRepo llmsRepo,
-                                          ProjectConversationDocsRepo projectConversationDocsRepo,
-                                          ObjectMapper objectMapper) {
+                                          ObjectMapper objectMapper,
+                                          ClaudeIngestionService claudeIngestionService) {
         this.userRepo = userRepo;
         this.affiliatedEmailsRepo = affiliatedEmailsRepo;
         this.llmsRepo = llmsRepo;
-        this.projectConversationDocsRepo = projectConversationDocsRepo;
         this.objectMapper = objectMapper;
+        this.claudeIngestionService = claudeIngestionService;
     }
     @Override
     public void extractUserInfo(ExtractionFileDTO extractionFileDTO) throws IOException {
@@ -121,11 +124,14 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
 
             AffiliatedEmail affiliatedEmail = null;
 
+            int noBatches = 0;
+
             while (iterator.hasNext()) {
 
                 batch.add(iterator.next());
 
                 if (batch.size() == 20 || !iterator.hasNext()) {
+                    noBatches++;
 
                     if (affiliatedEmail == null) {
 
@@ -173,13 +179,11 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
                     }
 
                     log.info(
-                            "Testing the claude parsing method: {}",
-                            embeddingCreation(
-                                    LlmTypes.CLAUDE,
-                                    affiliatedEmail,
-                                    batch
-                            )
+                            "Ingesting Batch no: {}",
+                            noBatches
                     );
+
+                    claudeIngestionService.ingestClaudeConversations(affiliatedEmail, batch);
 
                     batch.clear();
                 }
@@ -197,13 +201,5 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
                     400
             );
         }
-    }
-
-    private String embeddingCreation(
-            LlmTypes llmType,
-            AffiliatedEmail affiliatedEmail,
-            List<ClaudeConversationJsonDTO> claudeConversationJsonDTOList
-    ) {
-        return "test";
     }
 }

@@ -2,7 +2,7 @@ spring:
   application:
     name: parser
   datasource:
-    url: jdbc:postgresql://localhost:5432/NeuroIndex
+    url: jdbc:postgresql://localhost:5433/neuroindex
     username: postgres
     password: Thakur@7
     driver-class-name: org.postgresql.Driver
