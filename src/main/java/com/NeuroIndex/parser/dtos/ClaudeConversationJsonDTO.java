@@ -137,6 +137,9 @@ public class ClaudeConversationJsonDTO {
 
         @JsonProperty("display_content")
         private JsonNode displayContent;
+
+        @JsonProperty("input")
+        private Input input;
     }
 
     // -------------------------------------------------------------------------

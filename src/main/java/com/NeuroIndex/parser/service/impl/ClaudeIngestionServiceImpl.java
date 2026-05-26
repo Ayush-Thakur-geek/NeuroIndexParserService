@@ -1,5 +1,7 @@
 package com.NeuroIndex.parser.service.impl;
 
+import com.NeuroIndex.entity.domainObjects.SemanticUnit;
+import com.NeuroIndex.entity.enums.SemanticContentType;
 import com.NeuroIndex.entity.models.AffiliatedEmail;
 import com.NeuroIndex.entity.models.Conversation;
 import com.NeuroIndex.entity.models.Message;
@@ -10,6 +12,7 @@ import com.NeuroIndex.parser.repositories.ConversationRepo;
 import com.NeuroIndex.parser.repositories.MessageRepo;
 import com.NeuroIndex.parser.service.ClaudeIngestionService;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.transaction.Transactional;
 import lombok.extern.log4j.Log4j2;
@@ -17,10 +20,9 @@ import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
+import java.util.stream.Collectors;
 
 @Service
 @Log4j2
@@ -48,16 +50,23 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     public void ingestClaudeConversations(
             AffiliatedEmail affiliatedEmail,
             List<ClaudeConversationJsonDTO> conversationsDTO
-    ) {
+    ) throws JsonProcessingException {
+
+        Set<String> existingConversationHashes =
+                conversationRepo.findAllHashes();
+
+        Set<String> existingMessageHashes =
+                messageRepo.findAllHashes();
+
+        List<Conversation> conversationsToSave =
+                new ArrayList<>();
 
         for (ClaudeConversationJsonDTO dto : conversationsDTO) {
 
-            String conversationHash = hashConversation(dto);
+            String conversationHash =
+                    hashConversation(dto);
 
-            boolean exists =
-                    conversationRepo.existsByHash(conversationHash);
-
-            if (exists) {
+            if (existingConversationHashes.contains(conversationHash)) {
                 continue;
             }
 
@@ -68,28 +77,21 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                             conversationHash
                     );
 
-            List<Message> messages;
-
-            try {
-
-                messages = buildMessages(
-                        dto,
-                        conversation
-                );
-
-            } catch (Exception e) {
-
-                throw new CustomException(
-                        e.getMessage(),
-                        "CLAUDE_MESSAGE_INGESTION_FAILED",
-                        500
-                );
-            }
+            List<Message> messages =
+                    buildMessages(
+                            dto,
+                            conversation,
+                            existingMessageHashes
+                    );
 
             conversation.setMessages(messages);
 
-            conversationRepo.save(conversation);
+            conversationsToSave.add(conversation);
+
+            existingConversationHashes.add(conversationHash);
         }
+
+        conversationRepo.saveAll(conversationsToSave);
     }
 
     private Conversation buildConversation(
@@ -113,7 +115,8 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
 
     private List<Message> buildMessages(
             ClaudeConversationJsonDTO dto,
-            Conversation conversation
+            Conversation conversation,
+            Set<String> existingMessageHashes
     ) throws JsonProcessingException {
 
         List<Message> messages = new ArrayList<>();
@@ -136,31 +139,42 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                 continue;
             }
 
-            String semanticContent =
-                    extractSemanticContent(contents);
+            List<SemanticUnit> semanticUnits =
+                    extractSemanticUnit(contents);
 
-            if (semanticContent.isBlank()) {
+            if (semanticUnits.isEmpty()) {
                 continue;
             }
 
             String rawJson =
                     objectMapper.writeValueAsString(contents);
 
+            String normalizedText =
+                    semanticUnits.stream()
+                            .map(SemanticUnit::getExtractedText)
+                            .filter(Objects::nonNull)
+                            .collect(Collectors.joining("\n\n"));
+
+            normalizedText = normalizeContent(normalizedText);
+
             String messageHash =
                     hashMessage(
                             chatMessage.getSender(),
-                            semanticContent
+                            normalizedText
                     );
 
-            if (messageRepo.existsByHash(messageHash)) {
-                log.info("ALERT! hash clash for sequence: {}", sequence);
+            if (existingMessageHashes.contains(messageHash)) {
+                continue;
             }
+
+            existingMessageHashes.add(messageHash);
 
             Message message = Message.builder()
                     .conversation(conversation)
                     .sequence_number(sequence++)
                     .role(chatMessage.getSender())
-                    .content(semanticContent)
+                    .content(semanticUnits)
+                    .prompt(normalizedText)
                     .rawJsonContent(rawJson)
                     .hash(messageHash)
                     .build();
@@ -171,85 +185,98 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         return messages;
     }
 
-    private String extractSemanticContent(
+    private List<SemanticUnit> extractSemanticUnit(
             List<ClaudeConversationJsonDTO.Content> contents
     ) {
 
-        StringBuilder builder = new StringBuilder();
-
+        List<SemanticUnit> semanticUnits = new ArrayList<>();
         for (ClaudeConversationJsonDTO.Content content : contents) {
-
-            if (content == null) {
+            if (content == null)
                 continue;
-            }
 
             String type = content.getType();
 
             switch (type) {
-
                 case "text" -> {
-
                     if (content.getText() != null) {
-
-                        builder.append(content.getText())
-                                .append("\n\n");
+                        semanticUnits.add(
+                                SemanticUnit.builder()
+                                        .semanticContentType(SemanticContentType.TEXT)
+                                        .extractedText(content.getText())
+                                        .rawContent(objectMapper.valueToTree(
+                                                normalizeContent(
+                                                        content.getText()
+                                                )
+                                        ))
+                                        .build()
+                        );
                     }
+                    break;
                 }
 
-                case "thinking" -> {
-
-                    if (content.getThinking() != null) {
-
-                        builder.append(content.getThinking())
-                                .append("\n\n");
-                    }
-                }
-
-//                case "tool_result" -> {
-//
-//                    if (content.getContent() != null) {
-//
-//                        for (JsonNode node : content.getContent()) {
-//
-//                            if (node.has("text")) {
-//
-//                                builder.append(
-//                                                node.get("text").asText()
-//                                        )
-//                                        .append("\n\n");
-//                            }
-//                        }
-//                    }
-//                }
 
                 case "tool_use" -> {
 
-                    if (content.getName() != null) {
+                    JsonNode inputNode =
+                            objectMapper.valueToTree(content.getInput());
 
-                        builder.append("Tool Used: ")
-                                .append(content.getName())
-                                .append("\n\n");
+                    String artifactType = null;
+                    String language = null;
+
+                    if (inputNode.has("type")) {
+                        artifactType = inputNode.get("type").asText();
                     }
 
-                    if (content.getMessage() != null) {
-
-                        builder.append(content.getMessage())
-                                .append("\n\n");
+                    if (inputNode.has("language")) {
+                        language = inputNode.get("language").asText();
                     }
+
+                    if (inputNode.has("content")) {
+
+                        String extractedCode =
+                                inputNode.get("content").asText();
+
+                        semanticUnits.add(
+                                SemanticUnit.builder()
+                                        .semanticContentType(
+                                                SemanticContentType.CODE
+                                        )
+                                        .extractedText(extractedCode)
+                                        .rawContent(inputNode)
+                                        .metadata(
+                                                SemanticUnit.Metadata.builder()
+                                                        .language(language)
+                                                        .artifactType(artifactType)
+                                                        .build()
+                                        )
+                                        .build()
+                        );
+                    }
+                    break;
                 }
-
-                default -> {
-
-                    if (content.getText() != null) {
-
-                        builder.append(content.getText())
-                                .append("\n\n");
-                    }
-                }
+//                default -> {
+//                    if (content.getText() != null) {
+//
+//                        semanticUnits.add(
+//                                SemanticUnit.builder()
+//                                        .semanticContentType(SemanticContentType.TEXT)
+//                                        .extractedText(
+//                                                normalizeContent(content.getText())
+//                                        )
+//                                        .rawContent(
+//                                                objectMapper.valueToTree(
+//                                                        normalizeContent(
+//                                                                content.getText()
+//                                                        )
+//                                                )
+//                                        )
+//                                        .build()
+//                        );
+//                    }
+//                }
             }
         }
-
-        return normalizeContent(builder.toString());
+        return semanticUnits;
     }
 
     private String hashConversation(
