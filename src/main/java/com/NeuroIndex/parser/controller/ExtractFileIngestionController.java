@@ -24,7 +24,7 @@ public class ExtractFileIngestionController {
             value = "/user-file",
             consumes = MediaType.MULTIPART_FORM_DATA_VALUE
     )
-    public ResponseEntity<?> userFileIngestion(
+    public ResponseEntity<String> userFileIngestion(
             @ModelAttribute ExtractionFileDTO extractionFileDTO
     ) {
 
@@ -32,7 +32,7 @@ public class ExtractFileIngestionController {
 
             exportFileIngestionService.extractUserInfo(extractionFileDTO);
 
-            return ResponseEntity.ok().build();
+            return ResponseEntity.ok("OK");
 
         } catch (IOException e) {
 
@@ -50,7 +50,7 @@ public class ExtractFileIngestionController {
         try {
 
             exportFileIngestionService.parseConversationExportFile(extractionFileDTO);
-            return ResponseEntity.ok().build();
+            return ResponseEntity.ok("OK");
         } catch (IOException e) {
             throw new RuntimeException(e);
         }

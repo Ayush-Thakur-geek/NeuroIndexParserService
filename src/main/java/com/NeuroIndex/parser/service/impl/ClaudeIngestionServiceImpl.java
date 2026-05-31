@@ -11,6 +11,7 @@ import com.NeuroIndex.parser.repositories.AffiliatedEmailsRepo;
 import com.NeuroIndex.parser.repositories.ConversationRepo;
 import com.NeuroIndex.parser.repositories.MessageRepo;
 import com.NeuroIndex.parser.service.ClaudeIngestionService;
+import com.NeuroIndex.parser.service.SemanticFragmentationService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,17 +34,20 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     private final AffiliatedEmailsRepo affiliatedEmailRepo;
     private final ExecutorService executorService;
     private final ObjectMapper objectMapper;
+    private final SemanticFragmentationService semanticFragmentationService;
 
     ClaudeIngestionServiceImpl(ConversationRepo conversationRepo,
                                MessageRepo messageRepo,
                                AffiliatedEmailsRepo affiliatedEmailRepo,
                                ExecutorService executorService,
-                               ObjectMapper objectMapper) {
+                               ObjectMapper objectMapper,
+                               SemanticFragmentationService semanticFragmentationService) {
         this.conversationRepo = conversationRepo;
         this.messageRepo = messageRepo;
         this.affiliatedEmailRepo = affiliatedEmailRepo;
         this.executorService = executorService;
         this.objectMapper = objectMapper;
+        this.semanticFragmentationService = semanticFragmentationService;
     }
 
     @Transactional
@@ -60,6 +64,11 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
 
         List<Conversation> conversationsToSave =
                 new ArrayList<>();
+
+        // map to hold messages and their semantic units
+        // so we can fragment after persist
+        Map<Message, List<SemanticUnit>> fragmentationQueue =
+                new LinkedHashMap<>();
 
         for (ClaudeConversationJsonDTO dto : conversationsDTO) {
 
@@ -81,7 +90,8 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                     buildMessages(
                             dto,
                             conversation,
-                            existingMessageHashes
+                            existingMessageHashes,
+                            fragmentationQueue
                     );
 
             conversation.setMessages(messages);
@@ -91,7 +101,24 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
             existingConversationHashes.add(conversationHash);
         }
 
-        conversationRepo.saveAll(conversationsToSave);
+        // persist first — messages get their IDs here
+        conversationRepo.saveAllAndFlush(conversationsToSave);
+
+        // fragment after persist — message IDs now exist in db
+        try {
+            fragmentationQueue.forEach(
+                    semanticFragmentationService::messageSemanticFragmentation
+            );
+        } catch (Exception e) {
+
+            log.error("1 -> {}", e);
+            throw new CustomException(
+                    e.getMessage(),
+                    "DEBUGGING_ingestClaudeConversations",
+                    400,
+                    e
+            );
+        }
     }
 
     private Conversation buildConversation(
@@ -116,7 +143,8 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     private List<Message> buildMessages(
             ClaudeConversationJsonDTO dto,
             Conversation conversation,
-            Set<String> existingMessageHashes
+            Set<String> existingMessageHashes,
+            Map<Message, List<SemanticUnit>> fragmentationQueue
     ) throws JsonProcessingException {
 
         List<Message> messages = new ArrayList<>();
@@ -174,10 +202,12 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                     .sequence_number(sequence++)
                     .role(chatMessage.getSender())
                     .content(semanticUnits)
-                    .prompt(normalizedText)
                     .rawJsonContent(rawJson)
                     .hash(messageHash)
                     .build();
+
+            // queue for fragmentation, not execute yet
+            fragmentationQueue.put(message, semanticUnits);
 
             messages.add(message);
         }
