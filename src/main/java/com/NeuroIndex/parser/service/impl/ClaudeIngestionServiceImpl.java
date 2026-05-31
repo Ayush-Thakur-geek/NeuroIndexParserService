@@ -105,20 +105,9 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         conversationRepo.saveAllAndFlush(conversationsToSave);
 
         // fragment after persist — message IDs now exist in db
-        try {
-            fragmentationQueue.forEach(
-                    semanticFragmentationService::messageSemanticFragmentation
-            );
-        } catch (Exception e) {
-
-            log.error("1 -> {}", e);
-            throw new CustomException(
-                    e.getMessage(),
-                    "DEBUGGING_ingestClaudeConversations",
-                    400,
-                    e
-            );
-        }
+        fragmentationQueue.forEach(
+                semanticFragmentationService::messageSemanticFragmentation
+        );
     }
 
     private Conversation buildConversation(

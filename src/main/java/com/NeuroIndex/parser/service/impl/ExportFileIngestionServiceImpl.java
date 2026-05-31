@@ -193,7 +193,7 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
 
             throw new CustomException(
                     e.getMessage(),
-                    "LALA",
+                    "INGESTION_FAILED",
                     400,
                     e
             );

@@ -2,6 +2,7 @@ package com.NeuroIndex.parser.service.impl;
 
 import com.NeuroIndex.parser.dtos.OllamaEmbeddingRequestDTO;
 import com.NeuroIndex.parser.dtos.OllamaEmbeddingResponseDTO;
+import com.NeuroIndex.parser.exception.CustomException;
 import com.NeuroIndex.parser.service.EmbeddingService;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
@@ -46,8 +47,11 @@ public class EmbeddingServiceImpl
                         response.getEmbeddings() == null ||
                         response.getEmbeddings().isEmpty()
         ) {
-            throw new RuntimeException(
-                    "Failed to generate embeddings"
+            throw new CustomException(
+                    "No embeddings received from ollama",
+                    "NULL_EMBEDDINGS",
+                    400,
+                    new RuntimeException("No embeddings received from ollama")
             );
         }
 

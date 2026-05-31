@@ -10,6 +10,7 @@ import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.service.EmbeddingService;
 import com.NeuroIndex.parser.service.SemanticFragmentationService;
 import com.pgvector.PGvector;
+import jakarta.transaction.Transactional;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
 
@@ -237,24 +238,8 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
         return updated;
     }
 
-    private String truncate(String text) {
-        if (text.length() <= MAX_CHARS) return text;
-        String truncated = text.substring(0, MAX_CHARS);
-        int lastPeriod = Math.max(
-                truncated.lastIndexOf('.'),
-                Math.max(truncated.lastIndexOf('?'), truncated.lastIndexOf('!'))
-        );
-        return lastPeriod > MAX_CHARS / 2
-                ? truncated.substring(0, lastPeriod + 1)
-                : truncated;
-    }
-
     private void codeSemanticChunking(Message message, SemanticUnit semanticUnit) {
 
-    }
-
-    private String[] splitIntoParagraphs(String text) {
-        return text.split("\\r?\\n\\r?\\n");
     }
 
     private float cosine(
@@ -304,7 +289,8 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
         return similarity;
     }
 
-    private void saveFragment(
+    @Transactional
+    protected void saveFragment(
             String text,
             Message message,
             float[] embedding,
