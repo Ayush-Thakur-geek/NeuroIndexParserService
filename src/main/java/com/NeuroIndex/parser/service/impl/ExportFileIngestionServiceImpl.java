@@ -25,8 +25,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
-import java.util.concurrent.ExecutorService;
 
 @Service
 @Log4j2
@@ -159,22 +157,22 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
 
                         if (affiliatedEmail == null) {
 
-                            throw new CustomException(
-                                    "Conversation export does not belong to known affiliated account",
-                                    "ACCOUNT_IDENTITY_MISMATCH",
-                                    400
-                            );
+//                            throw new CustomException(
+//                                    "Conversation export does not belong to known affiliated account",
+//                                    "ACCOUNT_IDENTITY_MISMATCH",
+//                                    400
+//                            );
                         }
 
                         llm = llmsRepo.findByAffiliatedEmailObject(affiliatedEmail);
 
                         if (llm == null) {
 
-                            throw new CustomException(
-                                    "Linked llm provider not found",
-                                    "LINKED_PROVIDER_NOT_FOUND",
-                                    404
-                            );
+//                            throw new CustomException(
+//                                    "Linked llm provider not found",
+//                                    "LINKED_PROVIDER_NOT_FOUND",
+//                                    404
+//                            );
                         }
                     }
 
@@ -193,12 +191,11 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
             throw e;
         } catch (Exception e) {
 
-            log.error("Claude parsing failed", e);
-
             throw new CustomException(
                     e.getMessage(),
-                    "INVALID_PROVIDER_EXPORT",
-                    400
+                    "INGESTION_FAILED",
+                    400,
+                    e
             );
         }
     }
