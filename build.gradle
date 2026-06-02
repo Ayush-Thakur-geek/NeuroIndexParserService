@@ -39,6 +39,10 @@ dependencies {
 	developmentOnly 'org.springframework.boot:spring-boot-devtools'
 	runtimeOnly 'org.postgresql:postgresql'
 	annotationProcessor 'org.projectlombok:lombok'
+    // Source: https://mvnrepository.com/artifact/org.apache.lucene/lucene-core
+    implementation("org.apache.lucene:lucene-core:10.4.0")
+    // Source: https://mvnrepository.com/artifact/org.apache.lucene/lucene-queryparser
+    implementation("org.apache.lucene:lucene-queryparser:10.4.0")
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 //	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
 	testCompileOnly 'org.projectlombok:lombok'
