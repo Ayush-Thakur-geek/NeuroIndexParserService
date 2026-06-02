@@ -2,9 +2,9 @@ spring:
   application:
     name: parser
   datasource:
-    url: jdbc:postgresql://localhost:5432/NeuroIndex
+    url: jdbc:postgresql://localhost:5433/neuroindex
     username: postgres
-    password: Thakur@7
+    password: ${PG_PASSWORD}
     driver-class-name: org.postgresql.Driver
 
   jpa:
@@ -20,3 +20,7 @@ spring:
   sql:
     init:
       mode: always
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB

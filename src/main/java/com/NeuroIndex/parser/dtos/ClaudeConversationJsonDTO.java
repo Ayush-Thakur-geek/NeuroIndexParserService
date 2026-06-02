@@ -1,7 +1,9 @@
 package com.NeuroIndex.parser.dtos;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.*;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.time.Instant;
 import java.util.List;
@@ -11,6 +13,7 @@ import java.util.List;
 @AllArgsConstructor
 @NoArgsConstructor
 @Builder
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class ClaudeConversationJsonDTO {
 
     @JsonProperty("uuid")
@@ -108,73 +111,35 @@ public class ClaudeConversationJsonDTO {
     @AllArgsConstructor
     @NoArgsConstructor
     @Builder
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public static class Content {
 
         @JsonProperty("type")
         private String type;
 
-        @JsonProperty("id")
-        private String id;
-
-        /** Present on type="text" blocks. */
         @JsonProperty("text")
         private String text;
 
-        /** Present on type="thinking" blocks (extended thinking). */
         @JsonProperty("thinking")
         private String thinking;
-
-        /** Present on tool_result blocks. */
-        @JsonProperty("result")
-        private String result;
-
-        /** Tool / MCP display name. */
-        @JsonProperty("name")
-        private String name;
-
-        @JsonProperty("input")
-        private Input input;
 
         @JsonProperty("message")
         private String message;
 
-        @JsonProperty("start_timestamp")
-        private Instant startTimestamp;
+        @JsonProperty("name")
+        private String name;
 
-        @JsonProperty("stop_timestamp")
-        private Instant stopTimestamp;
+        @JsonProperty("citations")
+        private List<JsonNode> citations;
 
-        /** List of flag strings (e.g. ["beta"]). */
-        @JsonProperty("flags")
-        private List<String> flags;
-
-        @JsonProperty("integration_name")
-        private String integrationName;
-
-        @JsonProperty("integration_icon_url")
-        private String integrationIconUrl;
-
-        @JsonProperty("icon_name")
-        private String iconName;
-
-        @JsonProperty("context")
-        private String context;
+        @JsonProperty("content")
+        private List<JsonNode> nestedContent;
 
         @JsonProperty("display_content")
-        private String displayContent;
+        private JsonNode displayContent;
 
-        @JsonProperty("approval_options")
-        private List<String> approvalOptions;
-
-        @JsonProperty("approval_key")
-        private String approvalKey;
-
-        /** Correct type: boolean, not String. */
-        @JsonProperty("is_mcp_app")
-        private Boolean isMcpApp;
-
-        @JsonProperty("mcp_server_url")
-        private String mcpServerUrl;
+        @JsonProperty("input")
+        private Input input;
     }
 
     // -------------------------------------------------------------------------
