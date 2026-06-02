@@ -5,11 +5,10 @@ import com.NeuroIndex.entity.domainObjects.SemanticUnit;
 import com.NeuroIndex.entity.enums.SemanticContentType;
 import com.NeuroIndex.entity.models.Message;
 import com.NeuroIndex.entity.models.SemanticFragment;
-import com.NeuroIndex.parser.exception.CustomException;
 import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.service.EmbeddingService;
+import com.NeuroIndex.parser.service.KeyWordExtractionService;
 import com.NeuroIndex.parser.service.SemanticFragmentationService;
-import com.pgvector.PGvector;
 import jakarta.transaction.Transactional;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
@@ -27,6 +26,7 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
     private final ExecutorService executorService;
     private final EmbeddingService embeddingService;
     private final SemanticFragmentRepo semanticFragmentRepo;
+    private final KeyWordExtractionService  keyWordExtractionService;
 
     public static final float MAX_DRIFT = 0.25f;
     private static final int MAX_CHARS = 1800;
@@ -34,11 +34,13 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
     public SemanticFragmentationServiceImpl(
             ExecutorService executorService,
             EmbeddingService embeddingService,
-            SemanticFragmentRepo semanticFragmentRepo
+            SemanticFragmentRepo semanticFragmentRepo,
+            KeyWordExtractionService keyWordExtractionService
             ) {
         this.executorService = executorService;
         this.embeddingService = embeddingService;
         this.semanticFragmentRepo = semanticFragmentRepo;
+        this.keyWordExtractionService = keyWordExtractionService;
     }
 
     @Override
@@ -186,6 +188,12 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
         );
     }
 
+
+
+    private void codeSemanticChunking(Message message, SemanticUnit semanticUnit) {
+
+    }
+
     private float[] toPrimitive(
             List<Float> embedding
     ) {
@@ -236,10 +244,6 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
             updated[i] = (current[i] * n + next[i]) / (n + 1);
         }
         return updated;
-    }
-
-    private void codeSemanticChunking(Message message, SemanticUnit semanticUnit) {
-
     }
 
     private float cosine(
