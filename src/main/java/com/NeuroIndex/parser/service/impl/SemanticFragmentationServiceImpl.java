@@ -3,8 +3,8 @@ package com.NeuroIndex.parser.service.impl;
 import com.NeuroIndex.entity.constants.ParserServiceConstants;
 import com.NeuroIndex.entity.domainObjects.SemanticUnit;
 import com.NeuroIndex.entity.enums.SemanticContentType;
-import com.NeuroIndex.entity.models.Message;
-import com.NeuroIndex.entity.models.SemanticFragment;
+import com.NeuroIndex.entity.models.*;
+import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
 import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.service.EmbeddingService;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
@@ -306,7 +306,15 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
                     "Message ID is null during fragment save"
             );
         }
+
+
+        //Subject for removal after implementation of jwt
         String hash = hashChunk(message, chunkCount, text);
+        Conversation conversation = message.getConversation();
+        AffiliatedEmail affiliatedEmail = conversation.getAffiliatedEmail();
+        LLm llm = affiliatedEmail.getLlm();
+        User user = llm.getUser();
+        //-------------------------------------------------------
 
         SemanticFragment semanticFragment = SemanticFragment.builder()
                 .message(message)
@@ -317,6 +325,14 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
                 .confidenceScore(1f - similarity)
                 .build();
         semanticFragmentRepo.save(semanticFragment);
+
+        LuceneIndexDataDTO luceneIndexDataDTO = LuceneIndexDataDTO.builder()
+                .userId(user.getId())
+                .email(user.getEmail())
+                .semanticFragment(semanticFragment)
+                .build();
+
+        keyWordExtractionService.indexing(luceneIndexDataDTO);
     }
 
     private String hashChunk(

@@ -2,15 +2,14 @@ package com.NeuroIndex.parser.service.impl;
 
 import com.NeuroIndex.entity.domainObjects.SemanticUnit;
 import com.NeuroIndex.entity.enums.SemanticContentType;
-import com.NeuroIndex.entity.models.AffiliatedEmail;
-import com.NeuroIndex.entity.models.Conversation;
-import com.NeuroIndex.entity.models.Message;
+import com.NeuroIndex.entity.models.*;
 import com.NeuroIndex.parser.dtos.ClaudeConversationJsonDTO;
-import com.NeuroIndex.parser.exception.CustomException;
+import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
 import com.NeuroIndex.parser.repositories.AffiliatedEmailsRepo;
 import com.NeuroIndex.parser.repositories.ConversationRepo;
 import com.NeuroIndex.parser.repositories.MessageRepo;
 import com.NeuroIndex.parser.service.ClaudeIngestionService;
+import com.NeuroIndex.parser.service.KeyWordExtractionService;
 import com.NeuroIndex.parser.service.SemanticFragmentationService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -35,19 +34,22 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     private final ExecutorService executorService;
     private final ObjectMapper objectMapper;
     private final SemanticFragmentationService semanticFragmentationService;
+    private final KeyWordExtractionService keyWordExtractionService;
 
     ClaudeIngestionServiceImpl(ConversationRepo conversationRepo,
                                MessageRepo messageRepo,
                                AffiliatedEmailsRepo affiliatedEmailRepo,
                                ExecutorService executorService,
                                ObjectMapper objectMapper,
-                               SemanticFragmentationService semanticFragmentationService) {
+                               SemanticFragmentationService semanticFragmentationService,
+                               KeyWordExtractionService keyWordExtractionService) {
         this.conversationRepo = conversationRepo;
         this.messageRepo = messageRepo;
         this.affiliatedEmailRepo = affiliatedEmailRepo;
         this.executorService = executorService;
         this.objectMapper = objectMapper;
         this.semanticFragmentationService = semanticFragmentationService;
+        this.keyWordExtractionService = keyWordExtractionService;
     }
 
     @Transactional
@@ -108,6 +110,25 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         fragmentationQueue.forEach(
                 semanticFragmentationService::messageSemanticFragmentation
         );
+
+        LLm llm = affiliatedEmail.getLlm();
+        User user = llm.getUser();
+        Long id = user.getId();
+        String email = user.getEmail();
+        for (Conversation conversation : conversationsToSave) {
+            List<Message> messages = conversation.getMessages();
+            for (Message message : messages) {
+                List<SemanticFragment> semanticFragments = message.getSemanticFragments();
+                for (SemanticFragment semanticFragment : semanticFragments) {
+                    LuceneIndexDataDTO luceneIndexDataDTO = LuceneIndexDataDTO.builder()
+                            .userId(id)
+                            .email(email)
+                            .semanticFragment(semanticFragment)
+                            .build();
+                    keyWordExtractionService.extractingAndIndexing(luceneIndexDataDTO);
+                }
+            }
+        }
     }
 
     private Conversation buildConversation(
