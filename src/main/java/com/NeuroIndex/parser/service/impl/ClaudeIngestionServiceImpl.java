@@ -16,6 +16,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.transaction.Transactional;
 import lombok.extern.log4j.Log4j2;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
@@ -34,6 +35,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     private final ExecutorService executorService;
     private final ObjectMapper objectMapper;
     private final SemanticFragmentationService semanticFragmentationService;
+    private final ApplicationEventPublisher eventPublisher;
     private final KeyWordExtractionService keyWordExtractionService;
 
     ClaudeIngestionServiceImpl(ConversationRepo conversationRepo,
@@ -42,7 +44,8 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                                ExecutorService executorService,
                                ObjectMapper objectMapper,
                                SemanticFragmentationService semanticFragmentationService,
-                               KeyWordExtractionService keyWordExtractionService) {
+                               KeyWordExtractionService keyWordExtractionService,
+                               ApplicationEventPublisher eventPublisher) {
         this.conversationRepo = conversationRepo;
         this.messageRepo = messageRepo;
         this.affiliatedEmailRepo = affiliatedEmailRepo;
@@ -50,6 +53,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         this.objectMapper = objectMapper;
         this.semanticFragmentationService = semanticFragmentationService;
         this.keyWordExtractionService = keyWordExtractionService;
+        this.eventPublisher = eventPublisher;
     }
 
     @Transactional
@@ -113,22 +117,48 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
 
         LLm llm = affiliatedEmail.getLlm();
         User user = llm.getUser();
-        Long id = user.getId();
-        String email = user.getEmail();
+
+        List<LuceneIndexDataDTO> extractionTasks =
+                new ArrayList<>();
+
         for (Conversation conversation : conversationsToSave) {
-            List<Message> messages = conversation.getMessages();
+
+            List<Message> messages =
+                    conversation.getMessages();
+
             for (Message message : messages) {
-                List<SemanticFragment> semanticFragments = message.getSemanticFragments();
-                for (SemanticFragment semanticFragment : semanticFragments) {
-                    LuceneIndexDataDTO luceneIndexDataDTO = LuceneIndexDataDTO.builder()
-                            .userId(id)
-                            .email(email)
-                            .semanticFragment(semanticFragment)
-                            .build();
-                    keyWordExtractionService.extractingAndIndexing(luceneIndexDataDTO);
+
+                List<SemanticFragment> semanticFragments =
+                        message.getSemanticFragments();
+
+                for (SemanticFragment semanticFragment :
+                        semanticFragments) {
+
+                    extractionTasks.add(
+                            LuceneIndexDataDTO.builder()
+                                    .userId(user.getId())
+                                    .llmId(llm.getId())
+                                    .conversationId(conversation.getId())
+                                    .messageId(message.getId())
+                                    .semanticFragmentId(
+                                            semanticFragment.getId()
+                                    )
+                                    .text(semanticFragment.getText())
+                                    .build()
+                    );
                 }
             }
         }
+
+        eventPublisher.publishEvent(
+                new KeywordExtractionEvent(extractionTasks)
+        );
+
+    }
+
+    public record KeywordExtractionEvent(
+            List<LuceneIndexDataDTO> tasks
+    ) {
     }
 
     private Conversation buildConversation(

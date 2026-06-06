@@ -5,6 +5,7 @@ import com.NeuroIndex.entity.domainObjects.SemanticUnit;
 import com.NeuroIndex.entity.enums.SemanticContentType;
 import com.NeuroIndex.entity.models.*;
 import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
+import com.NeuroIndex.parser.repositories.MessageRepo;
 import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.service.EmbeddingService;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
@@ -15,6 +16,7 @@ import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -27,20 +29,22 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
     private final EmbeddingService embeddingService;
     private final SemanticFragmentRepo semanticFragmentRepo;
     private final KeyWordExtractionService  keyWordExtractionService;
+    private final MessageRepo messageRepo;
 
     public static final float MAX_DRIFT = 0.25f;
-    private static final int MAX_CHARS = 1800;
 
     public SemanticFragmentationServiceImpl(
             ExecutorService executorService,
             EmbeddingService embeddingService,
             SemanticFragmentRepo semanticFragmentRepo,
-            KeyWordExtractionService keyWordExtractionService
+            KeyWordExtractionService keyWordExtractionService,
+            MessageRepo messageRepo
             ) {
         this.executorService = executorService;
         this.embeddingService = embeddingService;
         this.semanticFragmentRepo = semanticFragmentRepo;
         this.keyWordExtractionService = keyWordExtractionService;
+        this.messageRepo = messageRepo;
     }
 
     @Override
@@ -48,12 +52,23 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
             Message message,
             List<SemanticUnit> semanticUnits
     ) {
+        List<SemanticFragment> semanticFragmentsToSave;
+        if (message.getSemanticFragments() != null) {
+            semanticFragmentsToSave = message.getSemanticFragments();
+        } else {
+            semanticFragmentsToSave = new ArrayList<>();
+        }
         for (SemanticUnit semanticUnit : semanticUnits) {
             try {
                 SemanticContentType type =
                         semanticUnit.getSemanticContentType();
                 switch (type) {
-                    case TEXT -> textSemanticChunking(message, semanticUnit);
+                    case TEXT -> {
+                        List<SemanticFragment> semanticFragments = textSemanticChunking(message, semanticUnit);
+                        if (!semanticFragments.isEmpty()) {
+                            semanticFragmentsToSave.addAll(semanticFragments);
+                        }
+                    }
                     case CODE -> codeSemanticChunking(message, semanticUnit);
                 }
             } catch (Exception e) {
@@ -65,9 +80,11 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
                 );
             }
         }
+        message.setSemanticFragments(semanticFragmentsToSave);
+        messageRepo.save(message);
     }
 
-    private void textSemanticChunking(
+    private List<SemanticFragment> textSemanticChunking(
             Message message,
             SemanticUnit semanticUnit
     ) {
@@ -86,8 +103,10 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
 
             log.info("No units found");
 
-            return;
+            return new ArrayList<>();
         }
+
+        List<SemanticFragment> semanticFragments = new ArrayList<>();
 
         List<String> paragraphs =
                 Arrays.asList(units);
@@ -156,13 +175,14 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
 
             } else {
 
-                saveFragment(
+                SemanticFragment semanticFragment = saveFragment(
                         currentChunk.toString(),
                         message,
                         currentCentroid,
                         ++chunkCount,
                         similarity
                 );
+                semanticFragments.add(semanticFragment);
 
                 currentChunk =
                         new StringBuilder(units[i]);
@@ -179,13 +199,16 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
             lastSimilarity = similarity;
         }
 
-        saveFragment(
+        SemanticFragment semanticFragment = saveFragment(
                 currentChunk.toString(),
                 message,
                 currentCentroid,
                 ++chunkCount,
                 lastSimilarity
         );
+
+        semanticFragments.add(semanticFragment);
+        return semanticFragments;
     }
 
 
@@ -294,7 +317,7 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
     }
 
     @Transactional
-    protected void saveFragment(
+    protected SemanticFragment saveFragment(
             String text,
             Message message,
             float[] embedding,
@@ -328,11 +351,16 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
 
         LuceneIndexDataDTO luceneIndexDataDTO = LuceneIndexDataDTO.builder()
                 .userId(user.getId())
-                .email(user.getEmail())
-                .semanticFragment(semanticFragment)
+                .llmId(llm.getId())
+                .affiliatedEmailId(affiliatedEmail.getId())
+                .conversationId(conversation.getId())
+                .messageId(message.getId())
+                .semanticFragmentId(semanticFragment.getId())
+                .text(semanticFragment.getText())
                 .build();
 
         keyWordExtractionService.indexing(luceneIndexDataDTO);
+        return semanticFragment;
     }
 
     private String hashChunk(

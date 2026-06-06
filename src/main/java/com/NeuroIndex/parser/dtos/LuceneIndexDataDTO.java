@@ -10,6 +10,10 @@ import lombok.*;
 @Builder
 public class LuceneIndexDataDTO {
     private Long userId;
-    private String email;
-    private SemanticFragment semanticFragment;
+    private Long llmId;
+    private Long affiliatedEmailId;
+    private Long conversationId;
+    private Long messageId;
+    private Long semanticFragmentId;
+    private String text;
 }
