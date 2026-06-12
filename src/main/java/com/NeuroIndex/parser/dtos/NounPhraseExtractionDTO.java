@@ -1,6 +1,5 @@
 package com.NeuroIndex.parser.dtos;
 
-import com.NeuroIndex.entity.models.SemanticFragment;
 import lombok.*;
 
 @Getter

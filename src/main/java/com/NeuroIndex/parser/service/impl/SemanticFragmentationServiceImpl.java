@@ -10,6 +10,7 @@ import com.NeuroIndex.parser.repositories.MessageRepo;
 import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.service.EmbeddingService;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
+import com.NeuroIndex.parser.service.NounPhraseExtractor;
 import com.NeuroIndex.parser.service.SemanticFragmentationService;
 import jakarta.transaction.Transactional;
 import lombok.extern.log4j.Log4j2;
@@ -31,6 +32,7 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
     private final SemanticFragmentRepo semanticFragmentRepo;
     private final KeyWordExtractionService  keyWordExtractionService;
     private final MessageRepo messageRepo;
+    private final NounPhraseExtractor nounPhraseExtractor;
 
     public static final float MAX_DRIFT = 0.25f;
 
@@ -39,13 +41,15 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
             EmbeddingService embeddingService,
             SemanticFragmentRepo semanticFragmentRepo,
             KeyWordExtractionService keyWordExtractionService,
-            MessageRepo messageRepo
-            ) {
+            MessageRepo messageRepo,
+            NounPhraseExtractor nounPhraseExtractor
+    ) {
         this.executorService = executorService;
         this.embeddingService = embeddingService;
         this.semanticFragmentRepo = semanticFragmentRepo;
         this.keyWordExtractionService = keyWordExtractionService;
         this.messageRepo = messageRepo;
+        this.nounPhraseExtractor = nounPhraseExtractor;
     }
 
     @Override
@@ -340,6 +344,10 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
         User user = llm.getUser();
         //-------------------------------------------------------
 
+        List<String> nounPhrases = nounPhraseExtractor.extractNounPhrase(text);
+
+        log.info("Noun phrases -> {}", nounPhrases);
+
         SemanticFragment semanticFragment = SemanticFragment.builder()
                 .message(message)
                 .text(text)
@@ -351,16 +359,6 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
         semanticFragmentRepo.save(semanticFragment);
 
         LuceneIndexDataDTO luceneIndexDataDTO = LuceneIndexDataDTO.builder()
-                .userId(user.getId())
-                .llmId(llm.getId())
-                .affiliatedEmailId(affiliatedEmail.getId())
-                .conversationId(conversation.getId())
-                .messageId(message.getId())
-                .semanticFragmentId(semanticFragment.getId())
-                .text(semanticFragment.getText())
-                .build();
-
-        NounPhraseExtractionDTO nounPhraseExtractionDTO = NounPhraseExtractionDTO.builder()
                 .userId(user.getId())
                 .llmId(llm.getId())
                 .affiliatedEmailId(affiliatedEmail.getId())

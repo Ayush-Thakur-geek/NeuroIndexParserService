@@ -1,6 +1,7 @@
 package com.NeuroIndex.parser.config;
 
 import com.NeuroIndex.parser.helperClasses.KeywordEmbeddingAccumulator;
+import org.apache.lucene.document.Document;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -21,6 +22,11 @@ public class KeywordConfig {
     @Bean
     public ConcurrentHashMap<String, float[]> keywordToCentroid() {
 
+        return new ConcurrentHashMap<>();
+    }
+
+    @Bean
+    public ConcurrentHashMap<Document, String> documentToNounPhrase() {
         return new ConcurrentHashMap<>();
     }
 }

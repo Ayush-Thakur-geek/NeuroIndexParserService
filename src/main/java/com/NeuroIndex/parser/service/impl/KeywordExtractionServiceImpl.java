@@ -2,6 +2,7 @@ package com.NeuroIndex.parser.service.impl;
 
 import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
 import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
+import com.NeuroIndex.parser.dtos.NounPhraseExtractionDTO;
 import com.NeuroIndex.parser.exception.CustomException;
 import com.NeuroIndex.parser.helperClasses.KeywordCandidate;
 import com.NeuroIndex.parser.helperClasses.KeywordEmbeddingAccumulator;
@@ -9,7 +10,6 @@ import com.NeuroIndex.parser.service.KeyWordExtractionService;
 import lombok.extern.log4j.Log4j2;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
-import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.util.BytesRef;
 import org.springframework.stereotype.Service;
 
@@ -27,6 +27,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     private static final FieldType BODY_FIELD_TYPE;
     private final ConcurrentHashMap<String, KeywordEmbeddingAccumulator> keywordAccumulator;
     private final ConcurrentHashMap<String, float[]> keywordToCentroid;
+    private final ConcurrentHashMap<Document, String> documentToNounPhrase;
 
     // Tunable constants
     private static final float THRESHOLD_FILTER_FOR_KEYWORDS;
@@ -63,12 +64,13 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
             IndexWriter indexWriter,
             ExecutorService executorService,
             ConcurrentHashMap<String, KeywordEmbeddingAccumulator> keywordAccumulator,
-            ConcurrentHashMap<String, float[]> keywordToCentroid
+            ConcurrentHashMap<String, float[]> keywordToCentroid, ConcurrentHashMap<Document, String> documentToNounPhrase
     ) {
         this.indexWriter        = indexWriter;
         this.executorService    = executorService;
         this.keywordAccumulator = keywordAccumulator;
         this.keywordToCentroid  = keywordToCentroid;
+        this.documentToNounPhrase = documentToNounPhrase;
     }
 
 // ---------------------------------------------------------------------------

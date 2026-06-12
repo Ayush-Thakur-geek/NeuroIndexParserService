@@ -32,7 +32,7 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-data-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-web'
-    implementation 'com.NeuroIndex:entity:0.0.2-SNAPSHOT'
+    implementation 'com.NeuroIndex:entity:0.0.3-SNAPSHOT'
     implementation 'org.springframework.ai:spring-ai-starter-model-ollama'
     implementation 'com.pgvector:pgvector:0.1.6'
 	compileOnly 'org.projectlombok:lombok'
