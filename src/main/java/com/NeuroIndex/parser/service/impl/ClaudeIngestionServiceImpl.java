@@ -5,6 +5,7 @@ import com.NeuroIndex.entity.enums.SemanticContentType;
 import com.NeuroIndex.entity.models.*;
 import com.NeuroIndex.parser.dtos.ClaudeConversationJsonDTO;
 import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
+import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
 import com.NeuroIndex.parser.repositories.AffiliatedEmailsRepo;
 import com.NeuroIndex.parser.repositories.ConversationRepo;
 import com.NeuroIndex.parser.repositories.MessageRepo;
@@ -118,7 +119,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         LLm llm = affiliatedEmail.getLlm();
         User user = llm.getUser();
 
-        List<LuceneIndexDataDTO> extractionTasks =
+        List<LuceneKeywordExtractDTO> extractionTasks =
                 new ArrayList<>();
 
         for (Conversation conversation : conversationsToSave) {
@@ -135,7 +136,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                         semanticFragments) {
 
                     extractionTasks.add(
-                            LuceneIndexDataDTO.builder()
+                            LuceneKeywordExtractDTO.builder()
                                     .userId(user.getId())
                                     .llmId(llm.getId())
                                     .conversationId(conversation.getId())
@@ -144,6 +145,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                                             semanticFragment.getId()
                                     )
                                     .text(semanticFragment.getText())
+                                    .embeddings(semanticFragment.getEmbedding())
                                     .build()
                     );
                 }
@@ -157,7 +159,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     }
 
     public record KeywordExtractionEvent(
-            List<LuceneIndexDataDTO> tasks
+            List<LuceneKeywordExtractDTO> tasks
     ) {
     }
 

@@ -1,6 +1,7 @@
 package com.NeuroIndex.parser.listners;
 
 import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
+import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
 import com.NeuroIndex.parser.service.impl.ClaudeIngestionServiceImpl;
 import lombok.RequiredArgsConstructor;
@@ -28,14 +29,14 @@ public class KeywordExtractionListener {
             ClaudeIngestionServiceImpl.KeywordExtractionEvent event
     ) {
 
-        List<LuceneIndexDataDTO> tasks = event.tasks();
+        List<LuceneKeywordExtractDTO> tasks = event.tasks();
 
         for (int i = 0; i < tasks.size(); i += BATCH_SIZE) {
 
             int end =
                     Math.min(i + BATCH_SIZE, tasks.size());
 
-            List<LuceneIndexDataDTO> batch =
+            List<LuceneKeywordExtractDTO> batch =
                     tasks.subList(i, end);
 
             try {

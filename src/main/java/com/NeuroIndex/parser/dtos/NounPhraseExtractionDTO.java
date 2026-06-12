@@ -1,5 +1,6 @@
 package com.NeuroIndex.parser.dtos;
 
+import com.NeuroIndex.entity.models.SemanticFragment;
 import lombok.*;
 
 @Getter
@@ -7,7 +8,7 @@ import lombok.*;
 @AllArgsConstructor
 @NoArgsConstructor
 @Builder
-public class LuceneIndexDataDTO {
+public class NounPhraseExtractionDTO {
     private Long userId;
     private Long llmId;
     private Long affiliatedEmailId;

@@ -7,7 +7,7 @@ import lombok.*;
 @AllArgsConstructor
 @NoArgsConstructor
 @Builder
-public class LuceneIndexDataDTO {
+public class LuceneKeywordExtractDTO {
     private Long userId;
     private Long llmId;
     private Long affiliatedEmailId;
@@ -15,4 +15,5 @@ public class LuceneIndexDataDTO {
     private Long messageId;
     private Long semanticFragmentId;
     private String text;
+    private float[] embeddings;
 }

@@ -43,6 +43,7 @@ dependencies {
     implementation("org.apache.lucene:lucene-core:10.4.0")
     // Source: https://mvnrepository.com/artifact/org.apache.lucene/lucene-queryparser
     implementation("org.apache.lucene:lucene-queryparser:10.4.0")
+    implementation 'org.apache.opennlp:opennlp-tools:2.5.5'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 //	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
 	testCompileOnly 'org.projectlombok:lombok'
