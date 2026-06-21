@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
+import java.util.regex.Pattern;
 
 @Service
 @Log4j2
@@ -35,6 +36,21 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
     private final NounPhraseExtractor nounPhraseExtractor;
 
     public static final float MAX_DRIFT = 0.25f;
+    private static final Pattern CODE_KEYWORDS = Pattern.compile(
+            "\\b(public|private|protected|static|void|class|interface|extends|implements|" +
+                    "import|package|return|new|throws|catch|finally|def|elif|lambda|self|" +
+                    "SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN|GROUP BY|ORDER BY|" +
+                    "function|const|let|var|=>|console\\.log|" +
+                    "#!/bin/|echo \\$|sudo |chmod |grep |awk |sed )\\b"
+    );
+
+    private static final Pattern CODE_PUNCTUATION_HEAVY = Pattern.compile(
+            "[{}();<>\\[\\]]"
+    );
+
+    private static final double SYMBOL_RATIO_THRESHOLD = 0.18; // symbols per character
+    private static final int    MIN_CONSECUTIVE_CODE_LINES = 1; // a single strong code line is enough
+    private static final double LINE_CODE_SCORE_THRESHOLD = 2.0;
 
     public SemanticFragmentationServiceImpl(
             ExecutorService executorService,
@@ -69,6 +85,9 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
                         semanticUnit.getSemanticContentType();
                 switch (type) {
                     case TEXT -> {
+                        String unfilteredText = semanticUnit.getExtractedText();
+                        String filteredText = removeCodeBlocks(unfilteredText);
+                        semanticUnit.setExtractedText(filteredText);
                         List<SemanticFragment> semanticFragments = textSemanticChunking(message, semanticUnit);
                         if (!semanticFragments.isEmpty()) {
                             semanticFragmentsToSave.addAll(semanticFragments);
@@ -87,6 +106,94 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
         }
         message.setSemanticFragments(semanticFragmentsToSave);
         messageRepo.save(message);
+    }
+
+    /**
+     * Removes both explicitly fenced code (```...``` or `...`) and unfenced
+     * raw code pasted inline, by scoring each line for "code-likelihood"
+     * and stripping consecutive runs of code-like lines.
+     */
+    private String removeCodeBlocks(String text) {
+
+        // Step 1: strip explicitly fenced/inline markdown code as before
+        String withoutFenced = text
+                .replaceAll("(?s)```.*?```", " ")
+                .replaceAll("`[^`]*`", " ");
+
+        // Step 2: strip unfenced raw code line-by-line
+        String[] lines = withoutFenced.split("\n", -1);
+        StringBuilder cleaned = new StringBuilder();
+
+        int i = 0;
+        while (i < lines.length) {
+
+            if (isCodeLikeLine(lines[i])) {
+                // Skip this run of consecutive code-like lines entirely
+                while (i < lines.length && isCodeLikeLine(lines[i])) {
+                    i++;
+                }
+                cleaned.append(" "); // preserve a separator so sentences don't fuse
+            } else {
+                cleaned.append(lines[i]).append("\n");
+                i++;
+            }
+        }
+
+        return cleaned.toString().replaceAll("[ \\t]{2,}", " ").trim();
+    }
+
+    /**
+     * Heuristic line classifier. Returns true if the line looks like source
+     * code (Java, Python, SQL, shell, JSON, JS) rather than natural-language
+     * prose. Tuned for precision over recall — false negatives (code that
+     * slips through) are safer than false positives (prose getting dropped).
+     */
+    private boolean isCodeLikeLine(String line) {
+
+        String trimmed = line.trim();
+        if (trimmed.isEmpty()) return false;
+
+        double score = 0.0;
+
+        // Signal 1: known code keywords across common languages
+        if (CODE_KEYWORDS.matcher(trimmed).find()) {
+            score += 2.0;
+        }
+
+        // Signal 2: line ends in a code-typical terminator
+        if (trimmed.endsWith(";") || trimmed.endsWith("{") || trimmed.endsWith("}")) {
+            score += 1.5;
+        }
+
+        // Signal 3: symbol density (punctuation per character)
+        long symbolCount = trimmed.chars()
+                .filter(c -> "{}();<>[]=&|%$#@".indexOf(c) >= 0)
+                .count();
+        double symbolRatio = (double) symbolCount / trimmed.length();
+        if (symbolRatio >= SYMBOL_RATIO_THRESHOLD) {
+            score += 1.5;
+        }
+
+        // Signal 4: heavy leading indentation (common in code, rare in prose)
+        int leadingSpaces = line.length() - line.stripLeading().length();
+        if (leadingSpaces >= 4 || line.startsWith("\t")) {
+            score += 1.0;
+        }
+
+        // Signal 5: looks like a JSON key-value or object literal fragment
+        if (trimmed.matches(".*\"[A-Za-z0-9_]+\"\\s*:\\s*.*")) {
+            score += 1.5;
+        }
+
+        // Signal 6: camelCase or snake_case identifier density (variable/method names)
+        long identifierLikeTokens = Arrays.stream(trimmed.split("\\s+"))
+                .filter(t -> t.matches("[a-z]+[A-Z][a-zA-Z0-9]*") || t.matches("[a-z0-9_]+_[a-z0-9_]+"))
+                .count();
+        if (identifierLikeTokens >= 2) {
+            score += 1.0;
+        }
+
+        return score >= LINE_CODE_SCORE_THRESHOLD;
     }
 
     private List<SemanticFragment> textSemanticChunking(
@@ -355,6 +462,7 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
                 .hash(hash)
                 .fragmentOrder(chunkCount)
                 .confidenceScore(1f - similarity)
+                .nounPhrases(nounPhrases)
                 .build();
         semanticFragmentRepo.save(semanticFragment);
 
@@ -366,6 +474,7 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
                 .messageId(message.getId())
                 .semanticFragmentId(semanticFragment.getId())
                 .text(semanticFragment.getText())
+                .nounPhrases(nounPhrases)
                 .build();
 
         keyWordExtractionService.indexing(luceneIndexDataDTO);

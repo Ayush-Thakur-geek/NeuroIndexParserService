@@ -1,6 +1,5 @@
 package com.NeuroIndex.parser.service.impl;
 
-import com.NeuroIndex.parser.dtos.NounPhraseExtractionDTO;
 import com.NeuroIndex.parser.service.NounPhraseExtractor;
 import lombok.extern.log4j.Log4j2;
 import opennlp.tools.chunker.ChunkerME;

@@ -5,6 +5,7 @@ import org.apache.lucene.document.Document;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Configuration
@@ -26,7 +27,7 @@ public class KeywordConfig {
     }
 
     @Bean
-    public ConcurrentHashMap<Document, String> documentToNounPhrase() {
+    public ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase() {
         return new ConcurrentHashMap<>();
     }
 }

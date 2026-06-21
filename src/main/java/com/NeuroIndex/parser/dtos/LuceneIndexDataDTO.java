@@ -2,6 +2,8 @@ package com.NeuroIndex.parser.dtos;
 
 import lombok.*;
 
+import java.util.List;
+
 @Getter
 @Setter
 @AllArgsConstructor
@@ -15,4 +17,5 @@ public class LuceneIndexDataDTO {
     private Long messageId;
     private Long semanticFragmentId;
     private String text;
+    List<String> nounPhrases;
 }

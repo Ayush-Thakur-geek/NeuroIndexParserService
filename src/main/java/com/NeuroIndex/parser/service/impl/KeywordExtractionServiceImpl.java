@@ -2,7 +2,6 @@ package com.NeuroIndex.parser.service.impl;
 
 import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
 import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
-import com.NeuroIndex.parser.dtos.NounPhraseExtractionDTO;
 import com.NeuroIndex.parser.exception.CustomException;
 import com.NeuroIndex.parser.helperClasses.KeywordCandidate;
 import com.NeuroIndex.parser.helperClasses.KeywordEmbeddingAccumulator;
@@ -14,9 +13,11 @@ import org.apache.lucene.util.BytesRef;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.text.Normalizer;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.stream.Collectors;
 
 @Service
 @Log4j2
@@ -27,7 +28,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     private static final FieldType BODY_FIELD_TYPE;
     private final ConcurrentHashMap<String, KeywordEmbeddingAccumulator> keywordAccumulator;
     private final ConcurrentHashMap<String, float[]> keywordToCentroid;
-    private final ConcurrentHashMap<Document, String> documentToNounPhrase;
+    private final ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase;
 
     // Tunable constants
     private static final float THRESHOLD_FILTER_FOR_KEYWORDS;
@@ -64,13 +65,14 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
             IndexWriter indexWriter,
             ExecutorService executorService,
             ConcurrentHashMap<String, KeywordEmbeddingAccumulator> keywordAccumulator,
-            ConcurrentHashMap<String, float[]> keywordToCentroid, ConcurrentHashMap<Document, String> documentToNounPhrase
+            ConcurrentHashMap<String, float[]> keywordToCentroid,
+            ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase
     ) {
         this.indexWriter        = indexWriter;
         this.executorService    = executorService;
         this.keywordAccumulator = keywordAccumulator;
         this.keywordToCentroid  = keywordToCentroid;
-        this.documentToNounPhrase = documentToNounPhrase;
+        this.fragmentIdToNounPhrase = fragmentIdToNounPhrase;
     }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +100,11 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
                 Integer docId = fragmentToDocIdMap.get(dto.getSemanticFragmentId());
                 if (docId == null) continue;
 
+                List<String> nounPhrases = fragmentIdToNounPhrase.getOrDefault(
+                        dto.getSemanticFragmentId(),
+                        Collections.emptyList()
+                );
+
                 Terms terms = directoryReader.termVectors().get(docId, "body");
                 if (terms == null) continue;
 
@@ -112,7 +119,17 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 
                 accumulateEmbeddings(selected, dto.getEmbeddings());
                 anyAccumulated = true;
+
                 log.info("selected keywords: {}", selected);
+
+                Set<String> selectedKeywords = selected.stream()
+                        .map(KeywordCandidate::keyword)
+                        .map(this::normalizeWords)
+                        .collect(Collectors.toSet());
+
+                List<String> validPhrases = filterPhrasesByKeywordOverlap(nounPhrases, selectedKeywords);
+
+                log.info("validPhrases: {} for text: {}", validPhrases, dto.getText());
             }
 
             // --- 3. Recompute centroids only if anything changed ----------------
@@ -125,6 +142,45 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
             log.error("Error extracting keywords", e);
             throw new CustomException(e.getMessage(), "KEYWORD_EXTRACTION_ERROR", 500, e);
         }
+    }
+
+    /**
+     * Keeps a noun phrase if at least one of its constituent words matches a
+     * BM25-selected keyword (after normalization).
+     *
+     * NOTE: a single-word overlap threshold is intentionally permissive —
+     * revisit if you want to require majority overlap for multi-word phrases.
+     */
+    private List<String> filterPhrasesByKeywordOverlap(
+            List<String> nounPhrases,
+            Set<String>  selectedKeywords
+    ) {
+        if (nounPhrases.isEmpty() || selectedKeywords.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<String> validPhrases = new ArrayList<>();
+
+        for (String phrase : nounPhrases) {
+            if (phrase == null || phrase.isBlank()) continue;
+
+            boolean hasOverlap = Arrays.stream(phrase.trim().split("\\s+"))
+                    .map(this::normalizeWords)
+                    .filter(w -> !w.isEmpty())
+                    .anyMatch(selectedKeywords::contains);
+
+            if (hasOverlap) {
+                validPhrases.add(phrase);
+            }
+        }
+
+        return validPhrases;
+    }
+
+    private String normalizeWords(String word) {
+        if (word == null) return "";
+        return word.toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]", ""); // strip underscores, punctuation, etc.
     }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +447,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
                             BODY_FIELD_TYPE
                     )
             );
+            fragmentIdToNounPhrase.put(luceneIndexDataDTO.getSemanticFragmentId(), luceneIndexDataDTO.getNounPhrases());
             indexWriter.addDocument(document);
             indexWriter.commit();
 
