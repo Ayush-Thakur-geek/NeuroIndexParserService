@@ -12,15 +12,6 @@ import java.util.concurrent.ConcurrentHashMap;
 public class KeywordConfig {
 
     @Bean
-    public ConcurrentHashMap<
-            String,
-            KeywordEmbeddingAccumulator
-            > keywordAccumulator() {
-
-        return new ConcurrentHashMap<>();
-    }
-
-    @Bean
     public ConcurrentHashMap<String, float[]> keywordToCentroid() {
 
         return new ConcurrentHashMap<>();
@@ -28,6 +19,16 @@ public class KeywordConfig {
 
     @Bean
     public ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase() {
+        return new ConcurrentHashMap<>();
+    }
+
+    @Bean
+    public ConcurrentHashMap<Long, ConcurrentHashMap<String, KeywordEmbeddingAccumulator>> keywordAccumulator() {
+        return new ConcurrentHashMap<>();
+    }
+
+    @Bean
+    public ConcurrentHashMap<Long, ConcurrentHashMap<String, Integer>> phraseOccurrenceByUser() {
         return new ConcurrentHashMap<>();
     }
 }

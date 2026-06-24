@@ -6,11 +6,14 @@ import com.NeuroIndex.parser.exception.CustomException;
 import com.NeuroIndex.parser.helperClasses.KeywordCandidate;
 import com.NeuroIndex.parser.helperClasses.KeywordEmbeddingAccumulator;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.log4j.Log4j2;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
 import org.apache.lucene.util.BytesRef;
 import org.springframework.stereotype.Service;
+import redis.clients.jedis.UnifiedJedis;
 
 import java.io.IOException;
 import java.text.Normalizer;
@@ -26,9 +29,12 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     private final IndexWriter indexWriter;
     private final ExecutorService executorService;
     private static final FieldType BODY_FIELD_TYPE;
-    private final ConcurrentHashMap<String, KeywordEmbeddingAccumulator> keywordAccumulator;
-    private final ConcurrentHashMap<String, float[]> keywordToCentroid;
+    private final ConcurrentHashMap<Long, ConcurrentHashMap<String, KeywordEmbeddingAccumulator>> keywordAccumulator;
+//    private final ConcurrentHashMap<String, float[]> keywordToCentroid;
     private final ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase;
+    private final UnifiedJedis jedis;
+    private final ObjectMapper objectMapper;
+    private final ConcurrentHashMap<Long, ConcurrentHashMap<String, Integer>> phraseOccurrenceByUser;
 
     // Tunable constants
     private static final float THRESHOLD_FILTER_FOR_KEYWORDS;
@@ -64,15 +70,19 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     KeywordExtractionServiceImpl(
             IndexWriter indexWriter,
             ExecutorService executorService,
-            ConcurrentHashMap<String, KeywordEmbeddingAccumulator> keywordAccumulator,
-            ConcurrentHashMap<String, float[]> keywordToCentroid,
-            ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase
+            ConcurrentHashMap<Long, ConcurrentHashMap<String, KeywordEmbeddingAccumulator>> keywordAccumulator,
+            ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase,
+            ObjectMapper objectMapper,
+            UnifiedJedis jedis,
+            ConcurrentHashMap<Long, ConcurrentHashMap<String, Integer>> phraseOccurrenceByUser
     ) {
         this.indexWriter        = indexWriter;
         this.executorService    = executorService;
         this.keywordAccumulator = keywordAccumulator;
-        this.keywordToCentroid  = keywordToCentroid;
         this.fragmentIdToNounPhrase = fragmentIdToNounPhrase;
+        this.objectMapper = objectMapper;
+        this.jedis = jedis;
+        this.phraseOccurrenceByUser = phraseOccurrenceByUser;
     }
 
 // ---------------------------------------------------------------------------
@@ -86,19 +96,21 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 
         try (DirectoryReader directoryReader = DirectoryReader.open(indexWriter)) {
 
-            // --- 1. Build fragmentId → docId map once per batch ----------------
             Map<Long, Integer> fragmentToDocIdMap = buildFragmentDocIdMap(directoryReader);
 
-            // --- 2. Pre-compute corpus-level stats needed for BM25 --------------
-            int   totalDocs      = directoryReader.numDocs();
-            float avgDocLength   = computeAverageDocLength(directoryReader);
+            int   totalDocs    = directoryReader.numDocs();
+            float avgDocLength = computeAverageDocLength(directoryReader);
 
-            boolean anyAccumulated = false;
+            // Group touched keywords per user, so computeCentroids only
+            // pushes the fields that actually changed for that user.
+            Map<Long, Set<String>> touchedKeywordsByUser = new HashMap<>();
 
             for (LuceneKeywordExtractDTO dto : batch) {
 
                 Integer docId = fragmentToDocIdMap.get(dto.getSemanticFragmentId());
                 if (docId == null) continue;
+
+                Long userId = dto.getUserId();
 
                 List<String> nounPhrases = fragmentIdToNounPhrase.getOrDefault(
                         dto.getSemanticFragmentId(),
@@ -117,8 +129,11 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 
                 List<KeywordCandidate> selected = selectByScoreDistribution(candidates);
 
-                accumulateEmbeddings(selected, dto.getEmbeddings());
-                anyAccumulated = true;
+                Set<String> keywordsThisFragment = accumulateEmbeddings(userId, selected, dto.getEmbeddings());
+
+                touchedKeywordsByUser
+                        .computeIfAbsent(userId, id -> new HashSet<>())
+                        .addAll(keywordsThisFragment);
 
                 log.info("selected keywords: {}", selected);
 
@@ -129,18 +144,37 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 
                 List<String> validPhrases = filterPhrasesByKeywordOverlap(nounPhrases, selectedKeywords);
 
+                // Phrases are recorded as graph-node candidates only.
+                // No vector is computed or stored for them here.
+                recordPhraseOccurrences(userId, validPhrases);
+
                 log.info("validPhrases: {} for text: {}", validPhrases, dto.getText());
             }
 
-            // --- 3. Recompute centroids only if anything changed ----------------
-            if (anyAccumulated) {
-                computeCentroids();
+            // Push only the touched keywords per user to Redis.
+            for (Map.Entry<Long, Set<String>> entry : touchedKeywordsByUser.entrySet()) {
+                computeCentroids(entry.getKey(), entry.getValue());
             }
-
 
         } catch (Exception e) {
             log.error("Error extracting keywords", e);
             throw new CustomException(e.getMessage(), "KEYWORD_EXTRACTION_ERROR", 500, e);
+        }
+    }
+
+    // Per-user record of which phrases exist as graph-node candidates,
+    // and how often each was observed. No vector data — vectors are
+    // derived on demand from keyword centroids when something needs them.
+
+    private void recordPhraseOccurrences(Long userId, List<String> validPhrases) {
+
+        ConcurrentHashMap<String, Integer> userPhrases =
+                phraseOccurrenceByUser.computeIfAbsent(userId, id -> new ConcurrentHashMap<>());
+
+        for (String phrase : validPhrases) {
+            String normalized = normalizePhrase(phrase);
+            if (normalized.isEmpty()) continue;
+            userPhrases.merge(normalized, 1, Integer::sum);
         }
     }
 
@@ -340,14 +374,17 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 // Step 5 – thread-safe embedding accumulation (fixed race condition)
 // ---------------------------------------------------------------------------
 
-    private void accumulateEmbeddings(List<KeywordCandidate> keywords, float[] embedding) {
+    private Set<String> accumulateEmbeddings(Long userId, List<KeywordCandidate> keywords, float[] embedding) {
+
+        ConcurrentHashMap<String, KeywordEmbeddingAccumulator> userAccumulator =
+                keywordAccumulator.computeIfAbsent(userId, id -> new ConcurrentHashMap<>());
+
+        Set<String> touched = new HashSet<>();
 
         for (KeywordCandidate candidate : keywords) {
             String keyword = candidate.keyword();
 
-            // computeIfAbsent is atomic for the insertion; we then synchronize
-            // on the *same* object reference for mutation — no double-lock gap.
-            KeywordEmbeddingAccumulator acc = keywordAccumulator.computeIfAbsent(
+            KeywordEmbeddingAccumulator acc = userAccumulator.computeIfAbsent(
                     keyword,
                     k -> new KeywordEmbeddingAccumulator(new float[embedding.length], 0)
             );
@@ -359,7 +396,11 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
                 }
                 acc.incrementCount();
             }
+
+            touched.add(keyword);
         }
+
+        return touched;
     }
 
     @Override
@@ -462,44 +503,117 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         }
     }
 
-    private void computeCentroids() {
+    private void computeCentroids(Long userId, Set<String> touchedKeywords) {
 
-        keywordToCentroid.clear();
+        String redisKey = "centroids:user:" + userId;
 
-        for (
-                Map.Entry<
-                        String,
-                        KeywordEmbeddingAccumulator
-                        > entry
-                : keywordAccumulator.entrySet()
-        ) {
+        ConcurrentHashMap<String, KeywordEmbeddingAccumulator> userAccumulator =
+                keywordAccumulator.get(userId);
 
-            KeywordEmbeddingAccumulator acc =
-                    entry.getValue();
+        if (userAccumulator == null) return;
 
-            long count =
-                    acc.getOccurrenceCount();
+        for (String keyword : touchedKeywords) {
 
-            if (count == 0) {
-                continue;
+            KeywordEmbeddingAccumulator acc = userAccumulator.get(keyword);
+            if (acc == null) continue;
+
+            long count = acc.getOccurrenceCount();
+            if (count == 0) continue;
+
+            float[] sum = acc.getEmbeddingSum();
+            float[] centroid = new float[sum.length];
+
+            synchronized (acc) {
+                for (int i = 0; i < sum.length; i++) {
+                    centroid[i] = sum[i] / count;
+                }
             }
 
-            float[] sum =
-                    acc.getEmbeddingSum();
-
-            float[] centroid =
-                    new float[sum.length];
-
-            for (int i = 0; i < sum.length; i++) {
-
-                centroid[i] =
-                        sum[i] / count;
+            try {
+                String centroidJson = objectMapper.writeValueAsString(centroid);
+                jedis.hset(redisKey, keyword, centroidJson);
+            } catch (JsonProcessingException e) {
+                log.error("Error while converting centroid for keyword [{}]: {}", keyword, e.getMessage());
             }
-
-            keywordToCentroid.put(
-                    entry.getKey(),
-                    centroid
-            );
         }
+    }
+
+    /**
+     * Computes a phrase's vector on demand from its constituent words'
+     * centroids. Not cached — call this only when a consumer (graph
+     * builder, similarity check) actually needs the vector, since each
+     * call costs one Redis read per distinct word in the phrase.
+     */
+    public float[] getPhraseCentroid(Long userId, String phrase) throws JsonProcessingException {
+
+        String redisKey = "centroids:user:" + userId;
+        String[] words = normalizePhrase(phrase).split(" ");
+
+        List<float[]> wordCentroids = new ArrayList<>();
+
+        for (String word : words) {
+            String json = jedis.hget(redisKey, word);
+            if (json == null) continue;
+            wordCentroids.add(objectMapper.readValue(json, float[].class));
+        }
+
+        if (wordCentroids.isEmpty()) return null; // no centroid evidence yet for any word
+
+        return averageVectors(wordCentroids);
+    }
+
+    /**
+     * Normalizes a phrase by applying the same per-word normalization used
+     * for keywords (lowercase, strip non-alphanumeric chars), then rejoining
+     * with single spaces. Reuses normalizeWords so keyword and phrase
+     * normalization can never drift out of sync.
+     *
+     * Blank/empty words (e.g. from punctuation-only tokens) are dropped
+     * rather than left as empty strings, so "WebSocket - handler" doesn't
+     * normalize to "websocket  handler" with a double space.
+     */
+    private String normalizePhrase(String phrase) {
+        if (phrase == null || phrase.isBlank()) return "";
+
+        return Arrays.stream(phrase.trim().split("\\s+"))
+                .map(this::normalizeWords)
+                .filter(w -> !w.isEmpty())
+                .collect(Collectors.joining(" "));
+    }
+
+    /**
+     * Averages a list of equal-length vectors element-wise.
+     *
+     * Assumes all vectors share the same dimensionality (true here since
+     * every centroid comes from the same embedding model). Throws if the
+     * list is empty — callers (e.g. getPhraseCentroid) must check for that
+     * before calling, since "average of nothing" has no sensible vector
+     * result and silently returning a zero-vector would be misleading
+     * (indistinguishable from a real centroid that happens to sum near zero).
+     */
+    private float[] averageVectors(List<float[]> vectors) {
+        if (vectors == null || vectors.isEmpty()) {
+            throw new IllegalArgumentException("Cannot average an empty list of vectors");
+        }
+
+        int dim = vectors.getFirst().length;
+        float[] sum = new float[dim];
+
+        for (float[] v : vectors) {
+            if (v.length != dim) {
+                throw new IllegalArgumentException(
+                        "Vector dimension mismatch: expected " + dim + " but got " + v.length
+                );
+            }
+            for (int i = 0; i < dim; i++) {
+                sum[i] += v[i];
+            }
+        }
+
+        for (int i = 0; i < dim; i++) {
+            sum[i] /= vectors.size();
+        }
+
+        return sum;
     }
 }
