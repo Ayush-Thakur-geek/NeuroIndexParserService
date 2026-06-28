@@ -9,6 +9,8 @@ import com.NeuroIndex.parser.service.KeyWordExtractionService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.log4j.Log4j2;
+import org.apache.lucene.analysis.en.EnglishAnalyzer;
+import org.apache.lucene.analysis.CharArraySet;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
 import org.apache.lucene.util.BytesRef;
@@ -30,7 +32,6 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     private final ExecutorService executorService;
     private static final FieldType BODY_FIELD_TYPE;
     private final ConcurrentHashMap<Long, ConcurrentHashMap<String, KeywordEmbeddingAccumulator>> keywordAccumulator;
-//    private final ConcurrentHashMap<String, float[]> keywordToCentroid;
     private final ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase;
     private final UnifiedJedis jedis;
     private final ObjectMapper objectMapper;
@@ -44,17 +45,26 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     private static final double SCORE_PERCENTILE_THRESHOLD  = 0.60; // keep top 40 % by score mass
     private static final double BM25_K1                     = 1.5;
     private static final double BM25_B                      = 0.75;
-    private static final Set<String> STOPWORDS              = Set.of(
-            "the","a","an","and","or","but","in","on","at","to","for",
-            "of","with","by","from","is","was","are","were","be","been",
-            "has","have","had","it","its","this","that","these","those",
-            "as","not","no","so","if","do","did","can","will","would",
-            "could","should","may","might","shall","also","just","into",
-            "about","than","then","when","where","which","who","whom",
-            "what","how","all","each","any","both","more","most","other",
-            "such","only","own","same","too","very","up","out","over",
-            "i","you","he","she","we","they","me","him","her","us","them"
-    );
+    // Replaces the hand-maintained Set.of(...) list. EnglishAnalyzer's bundled
+    // stopword set is the SMART list — a standard, well-vetted IR stopword
+    // list — so coverage gaps like missing "some"/"here" can't recur silently.
+    // CharArraySet wraps char[] internally for memory efficiency; .contains()
+    // accepts CharSequence/String directly, so no conversion needed at call sites.
+    private static final CharArraySet STOPWORDS = EnglishAnalyzer.ENGLISH_STOP_WORDS_SET;
+//    private static final Set<String> STOPWORDS              = Set.of(
+//            "the","a","an","and","or","but","in","on","at","to","for",
+//            "of","with","by","from","is","was","are","were","be","been",
+//            "has","have","had","it","its","this","that","these","those",
+//            "as","not","no","so","if","do","did","can","will","would",
+//            "could","should","may","might","shall","also","just","into",
+//            "about","than","then","when","where","which","who","whom",
+//            "what","how","all","each","any","both","more","most","other",
+//            "such","only","own","same","too","very","up","out","over",
+//            "i","you","he","she","we","they","me","him","her","us","them",
+//            "proper", "working", "correct", "nice"
+//    );
+
+    private static final Set<String> EXTRA_STOPWORDS = Set.of("here", "some");
 
     static {
         BODY_FIELD_TYPE = new FieldType();
@@ -64,7 +74,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         BODY_FIELD_TYPE.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS);
         BODY_FIELD_TYPE.freeze();
 
-        THRESHOLD_FILTER_FOR_KEYWORDS = 1.0f; // now actually enforced
+        THRESHOLD_FILTER_FOR_KEYWORDS = 4.0f; // now actually enforced
     }
 
     KeywordExtractionServiceImpl(
@@ -193,6 +203,8 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
             return Collections.emptyList();
         }
 
+        System.out.println("nounPhrases: " + nounPhrases);
+
         List<String> validPhrases = new ArrayList<>();
 
         for (String phrase : nounPhrases) {
@@ -279,10 +291,19 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 
             String keyword = termRef.utf8ToString().toLowerCase();
 
+            log.info("keyword: {}", keyword);
+
             // --- Noise filters -------------------------------------------------
             if (!isValidKeyword(keyword)) continue;
 
             int df = reader.docFreq(new Term("body", keyword));
+
+            log.info(
+                    "{} -> tf:{}, df:{}",
+                    keyword,
+                    termsEnum.totalTermFreq(),
+                    df
+            );
 
             // Ignore very rare terms (likely noise / OCR errors)
             if (df < MIN_DOC_FREQUENCY) continue;
@@ -291,6 +312,13 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 
             // --- BM25 score ----------------------------------------------------
             double bm25Score = computeBM25(rawTf, df, totalDocs, docLength, avgDocLength);
+            log.info(
+                    "{} -> tf:{}, df:{}, bm25 score:{}",
+                    keyword,
+                    termsEnum.totalTermFreq(),
+                    df,
+                    bm25Score
+            );
 
             if (bm25Score < THRESHOLD_FILTER_FOR_KEYWORDS) continue;
 
@@ -329,10 +357,10 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         if (token == null) return false;
         int len = token.length();
         if (len < MIN_KEYWORD_LENGTH || len > MAX_KEYWORD_LENGTH) return false;
-        if (STOPWORDS.contains(token.toLowerCase(Locale.ROOT)))   return false;
-        if (!token.chars().anyMatch(Character::isLetter))         return false; // purely numeric / punctuation
+        if (STOPWORDS.contains(token.toLowerCase(Locale.ROOT)) && EXTRA_STOPWORDS.contains(token.toLowerCase(Locale.ROOT)))   return false;
+        if (!token.chars().anyMatch(Character::isLetter))         return false;
         if (token.chars().filter(c -> !Character.isLetterOrDigit(c) && c != '-' && c != '_').count() > 2)
-            return false; // too many special chars → noise
+            return false;
         return true;
     }
 
