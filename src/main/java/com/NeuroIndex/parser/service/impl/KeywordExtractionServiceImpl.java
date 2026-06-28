@@ -18,6 +18,9 @@ import org.springframework.stereotype.Service;
 import redis.clients.jedis.UnifiedJedis;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.text.Normalizer;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -74,7 +77,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         BODY_FIELD_TYPE.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS);
         BODY_FIELD_TYPE.freeze();
 
-        THRESHOLD_FILTER_FOR_KEYWORDS = 4.0f; // now actually enforced
+        THRESHOLD_FILTER_FOR_KEYWORDS = 3.0f; // now actually enforced
     }
 
     KeywordExtractionServiceImpl(
@@ -145,7 +148,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
                         .computeIfAbsent(userId, id -> new HashSet<>())
                         .addAll(keywordsThisFragment);
 
-                log.info("selected keywords: {}", selected);
+//                log.info("selected keywords: {}", selected);
 
                 Set<String> selectedKeywords = selected.stream()
                         .map(KeywordCandidate::keyword)
@@ -158,7 +161,21 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
                 // No vector is computed or stored for them here.
                 recordPhraseOccurrences(userId, validPhrases);
 
-                log.info("validPhrases: {} for text: {}", validPhrases, dto.getText());
+                log.info("selected keywords: {} validPhrases: {} for text: {}", selectedKeywords, validPhrases, dto.getText());
+
+                String logText =
+                        "selected keywords: " + selectedKeywords
+                                +" \nvalidPhrases: " + validPhrases
+                                + "\nfor text: "
+                                +  dto.getText()
+                                + "\n----------------------------------------------------------\n";
+
+                Files.writeString(
+                        Paths.get("debug.txt"),
+                        logText + System.lineSeparator(),
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.APPEND
+                );
             }
 
             // Push only the touched keywords per user to Redis.

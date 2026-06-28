@@ -87,6 +87,7 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
                     case TEXT -> {
                         String unfilteredText = semanticUnit.getExtractedText();
                         String filteredText = removeCodeBlocks(unfilteredText);
+                        filteredText = normalizeMarkdown(filteredText);
                         semanticUnit.setExtractedText(filteredText);
                         List<SemanticFragment> semanticFragments = textSemanticChunking(message, semanticUnit);
                         if (!semanticFragments.isEmpty()) {
@@ -115,24 +116,34 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
      */
     private String removeCodeBlocks(String text) {
 
-        // Step 1: strip explicitly fenced/inline markdown code as before
-        String withoutFenced = text
-                .replaceAll("(?s)```.*?```", " ")
-                .replaceAll("`[^`]*`", " ");
+        // Step 1: strip fenced code blocks entirely (these are standalone,
+        // safe to remove without a placeholder — no surrounding sentence
+        // depends on a fenced block's content).
+        String withoutFencedBlocks = text.replaceAll("(?s)```.*?```", " ");
 
-        // Step 2: strip unfenced raw code line-by-line
-        String[] lines = withoutFenced.split("\n", -1);
+        // Step 2: replace INLINE code with a neutral placeholder noun
+        // instead of deleting it. An inline reference like `for` or
+        // `sendMessage()` is often a grammatical object inside a real
+        // sentence — deleting it outright leaves broken remnants
+        // ("Proper use of  loops"), while dropping the whole line (an
+        // earlier approach) loses unrelated real content in the same
+        // bullet ("WebSocket endpoints" in this example). A placeholder
+        // keeps the sentence parseable so the rest of the line still
+        // chunks correctly.
+        String withPlaceholders = withoutFencedBlocks.replaceAll("`[^`]*`", " code ");
+
+        // Step 3: strip unfenced raw code line-by-line (unchanged from before)
+        String[] lines = withPlaceholders.split("\n", -1);
         StringBuilder cleaned = new StringBuilder();
 
         int i = 0;
         while (i < lines.length) {
 
             if (isCodeLikeLine(lines[i])) {
-                // Skip this run of consecutive code-like lines entirely
                 while (i < lines.length && isCodeLikeLine(lines[i])) {
                     i++;
                 }
-                cleaned.append(" "); // preserve a separator so sentences don't fuse
+                cleaned.append(" ");
             } else {
                 cleaned.append(lines[i]).append("\n");
                 i++;
@@ -544,5 +555,49 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
 
             throw new RuntimeException(e);
         }
+    }
+
+    private String normalizeMarkdown(String text) {
+
+        String result = text
+                // Remove bold/italic markers
+                .replaceAll("\\*+", "")
+
+                // Remove markdown headings
+                .replaceAll("(?m)^#+\\s*", "")
+
+                // Convert bullets into sentences
+                .replaceAll("(?m)^\\s*[-*+]\\s*", "")
+
+                // Convert numbered lists
+                .replaceAll("(?m)^\\s*\\d+\\.\\s*", "");
+
+        // Join lines into sentences, but avoid stacking a period after a
+        // line that already ends in terminal punctuation (., !, ?, :) —
+        // unconditionally appending ". " after every newline produces
+        // artifacts like "Working:. Proper use..." which can confuse
+        // sentence/chunk boundary detection downstream.
+        String[] lines = result.split("\n");
+        StringBuilder joined = new StringBuilder();
+
+        for (String line : lines) {
+            String trimmedLine = line.trim();
+            if (trimmedLine.isEmpty()) continue;
+
+            if (joined.length() > 0) {
+                char lastChar = joined.charAt(joined.length() - 1);
+                if (lastChar != '.' && lastChar != '!' && lastChar != '?' && lastChar != ':') {
+                    joined.append(". ");
+                } else {
+                    joined.append(" ");
+                }
+            }
+
+            joined.append(trimmedLine);
+        }
+
+        return joined.toString()
+                .replaceAll("\\s+", " ")
+                .trim();
     }
 }
