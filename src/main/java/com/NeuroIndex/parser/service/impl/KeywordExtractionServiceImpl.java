@@ -7,10 +7,9 @@ import com.NeuroIndex.parser.helperClasses.KeywordCandidate;
 import com.NeuroIndex.parser.helperClasses.KeywordEmbeddingAccumulator;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.log4j.Log4j2;
-import org.apache.lucene.analysis.en.EnglishAnalyzer;
-import org.apache.lucene.analysis.CharArraySet;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
 import org.apache.lucene.util.BytesRef;
@@ -21,7 +20,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
-import java.text.Normalizer;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -53,21 +51,160 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     // list — so coverage gaps like missing "some"/"here" can't recur silently.
     // CharArraySet wraps char[] internally for memory efficiency; .contains()
     // accepts CharSequence/String directly, so no conversion needed at call sites.
-    private static final CharArraySet STOPWORDS = EnglishAnalyzer.ENGLISH_STOP_WORDS_SET;
-//    private static final Set<String> STOPWORDS              = Set.of(
-//            "the","a","an","and","or","but","in","on","at","to","for",
-//            "of","with","by","from","is","was","are","were","be","been",
-//            "has","have","had","it","its","this","that","these","those",
-//            "as","not","no","so","if","do","did","can","will","would",
-//            "could","should","may","might","shall","also","just","into",
-//            "about","than","then","when","where","which","who","whom",
-//            "what","how","all","each","any","both","more","most","other",
-//            "such","only","own","same","too","very","up","out","over",
-//            "i","you","he","she","we","they","me","him","her","us","them",
-//            "proper", "working", "correct", "nice"
-//    );
+//    private static final CharArraySet STOPWORDS = EnglishAnalyzer.ENGLISH_STOP_WORDS_SET;
+    private static final Set<String> STOPWORDS = Set.of(
 
-    private static final Set<String> EXTRA_STOPWORDS = Set.of("here", "some");
+            // Articles
+            "a","an","the",
+
+            // Pronouns
+            "i","me","my","mine","myself",
+            "you","your","yours","yourself","yourselves",
+            "he","him","his","himself",
+            "she","her","hers","herself",
+            "it","its","itself",
+            "we","us","our","ours","ourselves",
+            "they","them","their","theirs","themselves",
+
+            // Demonstratives
+            "this","that","these","those",
+
+            // Conjunctions
+            "and","or","but","nor","yet","so",
+
+            // Prepositions
+            "of","in","on","at","to","for","from","by","with","without",
+            "into","onto","upon","over","under","between","among",
+            "through","across","around","about","against","before","after",
+            "during","inside","outside","within","beyond","near","towards","toward",
+
+            // Auxiliary verbs
+            "is","am","are","was","were","be","been","being",
+            "have","has","had","having",
+            "do","does","did","doing",
+
+            // Modal verbs
+            "can","could","may","might","must","shall","should","will","would",
+
+            // Negations
+            "not","no","none","never","cannot","cant","don't","dont","doesn't",
+            "doesnt","didn't","didnt","won't","wont","isn't","isnt","aren't","arent",
+
+            // Quantifiers
+            "all","any","both","each","every","few","many","much",
+            "more","most","less","least","several","some","such","another",
+            "either","neither","enough",
+
+            // Adverbs
+            "also","just","only","very","too","quite","rather",
+            "almost","already","still","even","again","ever",
+            "always","often","sometimes","usually","generally",
+
+            // Question words
+            "what","which","who","whom","whose","when","where","why","how",
+
+            // Misc
+            "than","then","there","here","thus","therefore","however",
+            "because","although","though","while","whether","if","else",
+            "yes","nope","okay","ok",
+
+            // LLM conversational words
+            "working",
+            "proper",
+            "correct",
+            "good",
+            "great",
+            "nice",
+            "excellent",
+            "perfect",
+            "important",
+            "recommended",
+            "recommendation",
+            "recommendations",
+            "observation",
+            "observations",
+            "suggestion",
+            "suggestions",
+            "approach",
+            "approaches",
+            "solution",
+            "solutions",
+            "implementation",
+            "implementations",
+            "example",
+            "examples",
+            "overview",
+            "summary",
+            "note",
+            "notes",
+            "idea",
+            "ideas",
+            "thought",
+            "thoughts",
+            "discussion",
+            "analysis",
+            "consideration",
+            "considerations",
+            "option",
+            "options",
+            "possibility",
+            "possible",
+            "simply",
+            "basically",
+            "essentially",
+            "actually",
+            "overall",
+            "first",
+            "second",
+            "third",
+            "finally",
+            "next",
+            "following",
+
+            // Review words
+            "issue",
+            "issues",
+            "problem",
+            "problems",
+            "fix",
+            "fixed",
+            "bug",
+            "bugs",
+            "error",
+            "errors",
+            "warning",
+            "warnings",
+
+            // Common filler
+            "using",
+            "used",
+            "use",
+            "getting",
+            "got",
+            "make",
+            "made",
+            "need",
+            "needs",
+            "want",
+            "wants",
+            "look",
+            "looking",
+            "looks",
+            "see",
+            "seeing",
+            "check",
+            "checking",
+            "found",
+            "find",
+            "trying",
+            "try",
+            "works",
+            "work",
+            "helps",
+            "help",
+            "ensure",
+            "ensures"
+    );
 
     static {
         BODY_FIELD_TYPE = new FieldType();
@@ -106,7 +243,6 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     public void extractingKeyWords(List<LuceneKeywordExtractDTO> batch) {
 
         if (batch == null || batch.isEmpty()) return;
-
         try (DirectoryReader directoryReader = DirectoryReader.open(indexWriter)) {
 
             Map<Long, Integer> fragmentToDocIdMap = buildFragmentDocIdMap(directoryReader);
@@ -155,7 +291,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
                         .map(this::normalizeWords)
                         .collect(Collectors.toSet());
 
-                List<String> validPhrases = filterPhrasesByKeywordOverlap(nounPhrases, selectedKeywords);
+                List<String> validPhrases = filterPhrasesByKeywordOverlap(userId, nounPhrases, selectedKeywords);
 
                 // Phrases are recorded as graph-node candidates only.
                 // No vector is computed or stored for them here.
@@ -206,37 +342,84 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     }
 
     /**
-     * Keeps a noun phrase if at least one of its constituent words matches a
-     * BM25-selected keyword (after normalization).
+     * Filters noun phrases by overlap with BM25-selected keywords, then
+     * persists the surviving phrase → matched-keywords mapping to Redis.
      *
-     * NOTE: a single-word overlap threshold is intentionally permissive —
-     * revisit if you want to require majority overlap for multi-word phrases.
+     * Redis structure: HSET phrases:user:{userId}
+     *   field = normalized phrase string
+     *   value = JSON array of matched keyword strings
+     *   e.g. "websocket endpoints" → ["websocket", "endpoint"]
+     *
+     * A phrase with N words needs at least one word matching a selected
+     * keyword to survive — same permissive threshold as before, since
+     * BM25 selection is already the quality gate upstream.
      */
     private List<String> filterPhrasesByKeywordOverlap(
+            long userId,
             List<String> nounPhrases,
-            Set<String>  selectedKeywords
+            Set<String> selectedKeywords
     ) {
         if (nounPhrases.isEmpty() || selectedKeywords.isEmpty()) {
             return Collections.emptyList();
         }
 
-        System.out.println("nounPhrases: " + nounPhrases);
+        log.info("nounPhrases: {}", nounPhrases);
 
         List<String> validPhrases = new ArrayList<>();
+        String redisKey = "phrases:user:" + userId;
 
         for (String phrase : nounPhrases) {
             if (phrase == null || phrase.isBlank()) continue;
 
-            boolean hasOverlap = Arrays.stream(phrase.trim().split("\\s+"))
+            // Collect which selected keywords this phrase's words match.
+            // Uses Set.contains() directly — O(1) per word, not an inner
+            // loop over selectedKeywords which would be O(n*m).
+            List<String> matchedKeywords = Arrays.stream(phrase.trim().split("\\s+"))
                     .map(this::normalizeWords)
                     .filter(w -> !w.isEmpty())
-                    .anyMatch(selectedKeywords::contains);
+                    .filter(selectedKeywords::contains)
+                    .distinct()
+                    .collect(Collectors.toList());
 
-            if (hasOverlap) {
-                validPhrases.add(phrase);
+            if (matchedKeywords.isEmpty()) continue;
+
+            validPhrases.add(phrase);
+
+            // Persist phrase → matched keywords to Redis.
+            // Key is the normalized phrase so lookups are consistent with
+            // normalizePhrase() used everywhere else in the pipeline.
+            String normalizedPhrase = normalizePhrase(phrase);
+
+            try {
+                // Merge with any existing matched keywords for this phrase
+                // across previous batches — same fragment can re-appear
+                // with different selected keywords as the corpus grows and
+                // BM25 scores stabilize, so we accumulate rather than overwrite.
+                String existing = jedis.hget(redisKey, normalizedPhrase);
+
+                List<String> mergedKeywords;
+                if (existing != null) {
+                    List<String> previousKeywords = objectMapper.readValue(
+                            existing,
+                            new TypeReference<List<String>>() {}
+                    );
+                    Set<String> merged = new LinkedHashSet<>(previousKeywords);
+                    merged.addAll(matchedKeywords);
+                    mergedKeywords = new ArrayList<>(merged);
+                } else {
+                    mergedKeywords = matchedKeywords;
+                }
+
+                jedis.hset(redisKey, normalizedPhrase, objectMapper.writeValueAsString(mergedKeywords));
+
+            } catch (JsonProcessingException e) {
+                log.error("Failed to serialize matched keywords for phrase [{}]: {}", normalizedPhrase, e.getMessage());
+                // Don't rethrow — a Redis write failure for one phrase
+                // shouldn't abort the rest of the batch.
             }
         }
 
+        log.info("validPhrases: {}", validPhrases);
         return validPhrases;
     }
 
@@ -374,7 +557,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         if (token == null) return false;
         int len = token.length();
         if (len < MIN_KEYWORD_LENGTH || len > MAX_KEYWORD_LENGTH) return false;
-        if (STOPWORDS.contains(token.toLowerCase(Locale.ROOT)) && EXTRA_STOPWORDS.contains(token.toLowerCase(Locale.ROOT)))   return false;
+        if (STOPWORDS.contains(token.toLowerCase(Locale.ROOT)))   return false;
         if (!token.chars().anyMatch(Character::isLetter))         return false;
         if (token.chars().filter(c -> !Character.isLetterOrDigit(c) && c != '-' && c != '_').count() > 2)
             return false;

@@ -58,7 +58,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     }
 
     @Transactional
-    public void ingestClaudeConversations(
+    public List<Conversation> ingestClaudeConversations(
             AffiliatedEmail affiliatedEmail,
             List<ClaudeConversationJsonDTO> conversationsDTO
     ) throws JsonProcessingException {
@@ -116,13 +116,18 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                 semanticFragmentationService::messageSemanticFragmentation
         );
 
+
+        return conversationsToSave;
+    }
+
+    public void keywordExtractionInitiation(AffiliatedEmail affiliatedEmail, List<Conversation> conversations) {
         LLm llm = affiliatedEmail.getLlm();
         User user = llm.getUser();
 
         List<LuceneKeywordExtractDTO> extractionTasks =
                 new ArrayList<>();
 
-        for (Conversation conversation : conversationsToSave) {
+        for (Conversation conversation : conversations) {
 
             List<Message> messages =
                     conversation.getMessages();
@@ -155,7 +160,6 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         eventPublisher.publishEvent(
                 new KeywordExtractionEvent(extractionTasks)
         );
-
     }
 
     public record KeywordExtractionEvent(

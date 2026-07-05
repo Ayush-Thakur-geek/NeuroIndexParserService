@@ -108,6 +108,8 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
             MultipartFile jsonFile
     ) throws IOException {
 
+        List<Conversation> conversations = new ArrayList<>();
+
         try {
 
             MappingIterator<ClaudeConversationJsonDTO> iterator = objectMapper
@@ -181,11 +183,13 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
                             noBatches
                     );
 
-                    claudeIngestionService.ingestClaudeConversations(affiliatedEmail, batch);
+                    conversations.addAll(claudeIngestionService.ingestClaudeConversations(affiliatedEmail, batch));
 
                     batch.clear();
                 }
             }
+
+            claudeIngestionService.keywordExtractionInitiation(affiliatedEmail, conversations);
 
         } catch (CustomException e) {
             throw e;

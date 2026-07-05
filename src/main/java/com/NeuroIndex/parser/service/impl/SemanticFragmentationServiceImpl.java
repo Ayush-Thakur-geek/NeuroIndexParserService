@@ -5,7 +5,6 @@ import com.NeuroIndex.entity.domainObjects.SemanticUnit;
 import com.NeuroIndex.entity.enums.SemanticContentType;
 import com.NeuroIndex.entity.models.*;
 import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
-import com.NeuroIndex.parser.dtos.NounPhraseExtractionDTO;
 import com.NeuroIndex.parser.repositories.MessageRepo;
 import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.service.EmbeddingService;
