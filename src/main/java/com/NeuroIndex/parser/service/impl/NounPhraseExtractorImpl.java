@@ -4,247 +4,160 @@ import com.NeuroIndex.parser.service.NounPhraseExtractor;
 import lombok.extern.log4j.Log4j2;
 import opennlp.tools.chunker.ChunkerME;
 import opennlp.tools.chunker.ChunkerModel;
-import opennlp.tools.postag.POSDictionary;
 import opennlp.tools.postag.POSModel;
-import opennlp.tools.postag.POSTaggerFactory;
 import opennlp.tools.postag.POSTaggerME;
-import opennlp.tools.tokenize.Tokenizer;
+import opennlp.tools.sentdetect.SentenceDetectorME;
+import opennlp.tools.sentdetect.SentenceModel;
 import opennlp.tools.tokenize.TokenizerME;
 import opennlp.tools.tokenize.TokenizerModel;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
+import java.util.*;
+import java.util.regex.Pattern;
 
 @Service
 @Log4j2
 public class NounPhraseExtractorImpl implements NounPhraseExtractor {
-    private final Tokenizer tokenizer;
-    private final POSTaggerME posTagger;
-    private final ChunkerME chunker;
 
-    private static final Map<String, String> TECHNICAL_TERM_TAGS = Map.ofEntries(
-            // ===== Java =====
-            Map.entry("java", "NNP"),
-            Map.entry("jvm", "NNP"),
-            Map.entry("jdk", "NNP"),
-            Map.entry("jre", "NNP"),
-            Map.entry("class", "NN"),
-            Map.entry("interface", "NN"),
-            Map.entry("object", "NN"),
-            Map.entry("method", "NN"),
-            Map.entry("constructor", "NN"),
-            Map.entry("field", "NN"),
-            Map.entry("property", "NN"),
-            Map.entry("variable", "NN"),
-            Map.entry("parameter", "NN"),
-            Map.entry("argument", "NN"),
-            Map.entry("package", "NN"),
-            Map.entry("annotation", "NN"),
-            Map.entry("enum", "NN"),
-            Map.entry("record", "NN"),
-            Map.entry("lambda", "NN"),
-            Map.entry("stream", "NN"),
-            Map.entry("optional", "NN"),
-            Map.entry("thread", "NN"),
-            Map.entry("executor", "NN"),
-            Map.entry("future", "NN"),
-            Map.entry("completablefuture", "NN"),
-            Map.entry("callable", "NN"),
-            Map.entry("runnable", "NN"),
+    // ------------------------------------------------------------------
+    // Limits — bound the cost of a pathological fragment
+    // ------------------------------------------------------------------
+    private static final int MAX_TEXT_CHARS          = 100_000;
+    private static final int MAX_TOKENS_PER_SENTENCE = 512;
+    private static final int MAX_PHRASE_WORDS        = 6;
+    private static final int MIN_PHRASE_CHARS        = 2;
 
-            // ===== Spring =====
-            Map.entry("spring", "NNP"),
-            Map.entry("springboot", "NNP"),
-            Map.entry("springai", "NNP"),
-            Map.entry("bean", "NN"),
-            Map.entry("autowired", "NN"),
-            Map.entry("controller", "NN"),
-            Map.entry("service", "NN"),
-            Map.entry("repository", "NN"),
-            Map.entry("entity", "NN"),
-            Map.entry("component", "NN"),
-            Map.entry("configuration", "NN"),
-            Map.entry("transaction", "NN"),
-            Map.entry("validator", "NN"),
-            Map.entry("interceptor", "NN"),
-            Map.entry("filter", "NN"),
-            Map.entry("servlet", "NN"),
-            Map.entry("dependency", "NN"),
+    // ------------------------------------------------------------------
+    // Identifier detection by shape. Generalises to terms never seen before,
+    // which is the part a hand-maintained dictionary can never do.
+    // The leading lookahead requires at least one letter, so "2024" and
+    // "3.11" are not promoted to proper nouns.
+    // ------------------------------------------------------------------
+    private static final Pattern CODE_TOKEN = Pattern.compile(
+            "^(?=\\S*[A-Za-z])(?:"
+                    + "[a-z]+(?:[A-Z][A-Za-z0-9]*)+"          // camelCase
+                    + "|[A-Z][a-z0-9]*(?:[A-Z][A-Za-z0-9]*)+" // PascalCase
+                    + "|\\w+(?:_\\w+)+"                       // snake_case
+                    + "|\\w+(?:\\.\\w+)+"                     // dotted.path
+                    + "|[A-Za-z]+\\d+[A-Za-z0-9]*"            // bm25, oauth2, k8s
+                    + ")$");
 
-            // ===== Networking =====
-            Map.entry("websocket", "NNP"),
-            Map.entry("endpoint", "NN"),
-            Map.entry("socket", "NN"),
-            Map.entry("request", "NN"),
-            Map.entry("response", "NN"),
-            Map.entry("payload", "NN"),
-            Map.entry("handler", "NN"),
-            Map.entry("middleware", "NN"),
-            Map.entry("gateway", "NN"),
-            Map.entry("proxy", "NN"),
-            Map.entry("session", "NN"),
-            Map.entry("cookie", "NN"),
-            Map.entry("header", "NN"),
-            Map.entry("http", "NNP"),
-            Map.entry("https", "NNP"),
-            Map.entry("tcp", "NNP"),
-            Map.entry("udp", "NNP"),
-            Map.entry("grpc", "NNP"),
-            Map.entry("graphql", "NNP"),
-            Map.entry("rest", "NNP"),
+    /** Dotted-path shapes that are prose, not identifiers. */
+    private static final Set<String> NON_IDENTIFIERS = Set.of("e.g", "i.e", "etc", "vs", "a.k.a");
 
-            // ===== Security =====
-            Map.entry("jwt", "NNP"),
-            Map.entry("oauth", "NNP"),
-            Map.entry("oauth2", "NNP"),
-            Map.entry("authentication", "NN"),
-            Map.entry("authorization", "NN"),
-            Map.entry("credential", "NN"),
-            Map.entry("certificate", "NN"),
-            Map.entry("hash", "NN"),
-            Map.entry("encryption", "NN"),
-            Map.entry("token", "NN"),
-
-            // ===== Database =====
-            Map.entry("database", "NN"),
-            Map.entry("schema", "NN"),
-            Map.entry("table", "NN"),
-            Map.entry("column", "NN"),
-            Map.entry("row", "NN"),
-            Map.entry("query", "NN"),
-            Map.entry("index", "NN"),
-            Map.entry("constraint", "NN"),
-            Map.entry("postgres", "NNP"),
-            Map.entry("postgresql", "NNP"),
-            Map.entry("mysql", "NNP"),
-            Map.entry("mongodb", "NNP"),
-            Map.entry("redis", "NNP"),
-            Map.entry("sqlite", "NNP"),
-            Map.entry("pgvector", "NNP"),
-
-            // ===== Lucene =====
-            Map.entry("lucene", "NNP"),
-            Map.entry("analyzer", "NN"),
-            Map.entry("tokenizer", "NN"),
-            Map.entry("term", "NN"),
-            Map.entry("termvector", "NN"),
-            Map.entry("directoryreader", "NNP"),
-            Map.entry("indexwriter", "NNP"),
-            Map.entry("indexreader", "NNP"),
-            Map.entry("document", "NN"),
-            Map.entry("storedfield", "NNP"),
-            Map.entry("longpoint", "NNP"),
-
-            // ===== Retrieval =====
-            Map.entry("bm25", "NNP"),
-            Map.entry("embedding", "NN"),
-            Map.entry("embeddings", "NN"),
-            Map.entry("vector", "NN"),
-            Map.entry("centroid", "NN"),
-            Map.entry("similarity", "NN"),
-            Map.entry("semantic", "JJ"),
-            Map.entry("fragment", "NN"),
-            Map.entry("fragments", "NN"),
-            Map.entry("retrieval", "NN"),
-            Map.entry("keyword", "NN"),
-            Map.entry("keywords", "NN"),
-            Map.entry("graph", "NN"),
-            Map.entry("node", "NN"),
-            Map.entry("edge", "NN"),
-            Map.entry("cluster", "NN"),
-            Map.entry("alias", "NN"),
-            Map.entry("chunk", "NN"),
-            Map.entry("chunking", "NN"),
-            Map.entry("parser", "NN"),
-            Map.entry("corpus", "NN"),
-            Map.entry("documentfrequency", "NN"),
-            Map.entry("idf", "NNP"),
-            Map.entry("tf", "NNP"),
-
-            // ===== OpenNLP =====
-            Map.entry("opennlp", "NNP"),
-            Map.entry("chunker", "NN"),
-            Map.entry("postagger", "NN"),
-            Map.entry("noun", "NN"),
-            Map.entry("phrase", "NN"),
-            Map.entry("tokenization", "NN"),
-            Map.entry("pos", "NN"),
-
-            // ===== AI =====
-            Map.entry("ollama", "NNP"),
-            Map.entry("nomic", "NNP"),
-            Map.entry("bgem3", "NNP"),
-            Map.entry("llm", "NNP"),
-            Map.entry("chatgpt", "NNP"),
-            Map.entry("claude", "NNP"),
-            Map.entry("gemini", "NNP"),
-            Map.entry("prompt", "NN"),
-            Map.entry("completion", "NN"),
-            Map.entry("inference", "NN"),
-            Map.entry("transformer", "NN"),
-            Map.entry("attention", "NN"),
-
-            // ===== DevOps =====
-            Map.entry("docker", "NNP"),
-            Map.entry("container", "NN"),
-            Map.entry("kubernetes", "NNP"),
-            Map.entry("deployment", "NN"),
-            Map.entry("pipeline", "NN"),
-
-            // ===== Collections =====
-            Map.entry("map", "NN"),
-            Map.entry("hashmap", "NN"),
-            Map.entry("concurrenthashmap", "NN"),
-            Map.entry("list", "NN"),
-            Map.entry("arraylist", "NN"),
-            Map.entry("set", "NN"),
-            Map.entry("hashset", "NN"),
-            Map.entry("queue", "NN"),
-            Map.entry("deque", "NN"),
-
-            // ===== NeuroIndex =====
-            Map.entry("userid", "NN"),
-            Map.entry("conversationid", "NN"),
-            Map.entry("messageid", "NN"),
-            Map.entry("fragmentid", "NN"),
-            Map.entry("roomid", "NN"),
-            Map.entry("cache", "NN"),
-            Map.entry("cachemanager", "NN"),
-            Map.entry("userservice", "NN"),
-            Map.entry("messageservice", "NN"),
-            Map.entry("graphnode", "NN"),
-            Map.entry("semanticunit", "NN"),
-            Map.entry("semanticfragment", "NN"),
-            Map.entry("keywordcandidate", "NN"),
-            Map.entry("dto", "NN")
+    // ------------------------------------------------------------------
+    // Phrase edge trimming. OpenNLP NP chunks legitimately include
+    // determiners and pronouns; they are noise at the edges of a stored
+    // phrase but meaningful inside it ("index out of bounds").
+    // ------------------------------------------------------------------
+    private static final Set<String> EDGE_STOPWORDS = Set.of(
+            "a","an","the","this","that","these","those",
+            "my","your","his","her","its","our","their",
+            "i","you","he","she","it","we","they",
+            "some","any","all","each","every","another","other","such","same",
+            "no","none","both","either","neither","much","many","more","most","few","several"
     );
 
-    public NounPhraseExtractorImpl() throws IOException {
+    // ------------------------------------------------------------------
+    // Tag overrides — DISAMBIGUATION ONLY.
+    //
+    // Deliberately excluded: index, filter, record, cache, map, stream,
+    // query, set, rest, service, document, object, field, term, request,
+    // handler, chunk, work, check, use. Every one of those is also a common
+    // verb, and forcing a noun tag makes the chunker emit phrases that do
+    // not exist ("index the document" -> NP "index").
+    // ------------------------------------------------------------------
+    private static final Map<String, String> TECHNICAL_TERM_TAGS = buildTechnicalTermTags();
 
-        try (
-                InputStream tokenModelIn =
-                        getClass().getResourceAsStream("/models/en-token.bin");
+    private static Map<String, String> buildTechnicalTermTags() {
+        Map<String, String> m = new HashMap<>();
 
-                InputStream posModelIn =
-                        getClass().getResourceAsStream("/models/en-pos-maxent.bin");
+        // Unambiguous proper nouns the model mis-tags as common nouns.
+        String[] properNouns = {
+                "java","jvm","jdk","jre","spring","springboot","springai","hibernate","jpa",
+                "lucene","opennlp","solr","elasticsearch",
+                "postgres","postgresql","mysql","mongodb","redis","sqlite","pgvector","kafka","rabbitmq",
+                "websocket","http","https","tcp","udp","grpc","graphql","nginx",
+                "jwt","oauth","oauth2","tls","ssl",
+                "bm25","idf","tfidf","hnsw","ivf","faiss",
+                "llm","chatgpt","claude","gemini","ollama","nomic","bgem3","openai","anthropic",
+                "docker","kubernetes","linux","ubuntu","git","github","maven","gradle",
+                "json","yaml","xml","sql","nosql","api","sdk","dto","crud","uuid",
+                "completablefuture","concurrenthashmap","hashmap","arraylist","hashset","linkedlist",
+                "directoryreader","indexwriter","indexreader","storedfield","longpoint","termsenum"
+        };
+        for (String w : properNouns) put(m, w, "NNP");
 
-                InputStream chunkerModelIn =
-                        getClass().getResourceAsStream("/models/en-chunker.bin")
-        ) {
+        // Domain nouns with no common verb sense.
+        String[] commonNouns = {
+                "centroid","embedding","embeddings","tokenizer","analyzer","chunker","postagger",
+                "middleware","payload","endpoint","servlet","interceptor","annotation",
+                "authentication","authorization","encryption","credential","certificate",
+                "similarity","retrieval","corpus","keyword","keywords","latency","throughput",
+                "concurrency","deserialization","serialization","idempotency"
+        };
+        for (String w : commonNouns) put(m, w, "NN");
 
-            requireResource(tokenModelIn, "/models/en-token.bin");
-            requireResource(posModelIn, "/models/en-pos-maxent.bin");
-            requireResource(chunkerModelIn, "/models/en-chunker.bin");
+        return Map.copyOf(m);
+    }
 
-            tokenizer = new TokenizerME(new TokenizerModel(tokenModelIn));
-            posTagger = new POSTaggerME(new POSModel(posModelIn));
-            chunker = new ChunkerME(new ChunkerModel(chunkerModelIn));
+    private static void put(Map<String, String> m, String word, String tag) {
+        String previous = m.put(word, tag);
+        if (previous != null && !previous.equals(tag)) {
+            log.warn("Duplicate tag override for [{}]: {} replaced by {}", word, previous, tag);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Models are immutable and shareable; the *ME wrappers are NOT
+    // thread-safe (they hold mutable beam-search state), so each thread
+    // gets its own instance.
+    // ------------------------------------------------------------------
+    private final ThreadLocal<TokenizerME>        tokenizer;
+    private final ThreadLocal<POSTaggerME>        posTagger;
+    private final ThreadLocal<ChunkerME>          chunker;
+    private final ThreadLocal<SentenceDetectorME> sentenceDetector;   // null when model absent
+
+    public NounPhraseExtractorImpl() throws IOException {
+        TokenizerModel tokenModel;
+        POSModel       posModel;
+        ChunkerModel   chunkerModel;
+
+        try (InputStream tokenIn   = getClass().getResourceAsStream("/models/en-token.bin");
+             InputStream posIn     = getClass().getResourceAsStream("/models/en-pos-maxent.bin");
+             InputStream chunkerIn = getClass().getResourceAsStream("/models/en-chunker.bin")) {
+
+            requireResource(tokenIn,   "/models/en-token.bin");
+            requireResource(posIn,     "/models/en-pos-maxent.bin");
+            requireResource(chunkerIn, "/models/en-chunker.bin");
+
+            tokenModel   = new TokenizerModel(tokenIn);
+            posModel     = new POSModel(posIn);
+            chunkerModel = new ChunkerModel(chunkerIn);
+        }
+
+        // Optional: POS models are trained per-sentence, so splitting first
+        // materially improves tagging. Degrade gracefully if absent.
+        SentenceModel loadedSentenceModel = null;
+        try (InputStream sentIn = getClass().getResourceAsStream("/models/en-sent.bin")) {
+            if (sentIn != null) {
+                loadedSentenceModel = new SentenceModel(sentIn);
+            } else {
+                log.warn("/models/en-sent.bin not found — tagging whole fragments as one sentence, "
+                        + "which reduces POS accuracy. Add the model to improve phrase quality.");
+            }
+        }
+
+        this.tokenizer = ThreadLocal.withInitial(() -> new TokenizerME(tokenModel));
+        this.posTagger = ThreadLocal.withInitial(() -> new POSTaggerME(posModel));
+        this.chunker   = ThreadLocal.withInitial(() -> new ChunkerME(chunkerModel));
+
+        final SentenceModel sentenceModel = loadedSentenceModel;
+        this.sentenceDetector = sentenceModel == null
+                ? null
+                : ThreadLocal.withInitial(() -> new SentenceDetectorME(sentenceModel));
     }
 
     private void requireResource(InputStream stream, String resourcePath) throws IOException {
@@ -253,78 +166,144 @@ public class NounPhraseExtractorImpl implements NounPhraseExtractor {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Public API
+    // ------------------------------------------------------------------
 
     @Override
     public List<String> extractNounPhrase(String text) {
-        String[] tokens = tokenizer.tokenize(text);
+        if (text == null || text.isBlank()) return List.of();
 
-        String[] posTags = posTagger.tag(tokens);
+        String input = text.length() > MAX_TEXT_CHARS
+                ? text.substring(0, MAX_TEXT_CHARS)
+                : text;
 
-        // Override tags for known technical terms post-hoc, since the loaded
-        // model's factory can't accept a tag dictionary after deserialization.
-        applyTechnicalTermOverrides(tokens, posTags);
+        // Key = lowercase form (dedup), value = first-seen surface form.
+        Map<String, String> phrases = new LinkedHashMap<>();
 
-        String[] chunks = chunker.chunk(tokens, posTags);
-        List<String> nounPhrases =
-                new ArrayList<>();
-
-        StringBuilder currentPhrase =
-                new StringBuilder();
-
-        for (int i = 0; i < chunks.length; i++) {
-
-            String chunkTag =
-                    chunks[i];
-
-            if ("B-NP".equals(chunkTag)) {
-
-                if (!currentPhrase.isEmpty()) {
-
-                    nounPhrases.add(
-                            currentPhrase.toString().trim()
-                    );
-
-                    currentPhrase.setLength(0);
-                }
-
-                currentPhrase.append(tokens[i]);
-
-            } else if ("I-NP".equals(chunkTag)) {
-
-                currentPhrase
-                        .append(" ")
-                        .append(tokens[i]);
-
-            } else {
-
-                if (!currentPhrase.isEmpty()) {
-
-                    nounPhrases.add(
-                            currentPhrase.toString().trim()
-                    );
-
-                    currentPhrase.setLength(0);
-                }
+        for (String sentence : splitSentences(input)) {
+            if (sentence.isBlank()) continue;
+            try {
+                collectFromSentence(sentence, phrases);
+            } catch (RuntimeException e) {
+                // One bad sentence must not lose the rest of the fragment.
+                log.warn("Phrase extraction failed for sentence of {} chars: {}",
+                        sentence.length(), e.toString());
             }
         }
 
-        if (!currentPhrase.isEmpty()) {
-
-            nounPhrases.add(
-                    currentPhrase.toString().trim()
-            );
-        }
-
-        return nounPhrases;
+        return new ArrayList<>(phrases.values());
     }
 
-    private void applyTechnicalTermOverrides(String[] tokens, String[] posTags) {
-        for (int i = 0; i < tokens.length; i++) {
-            String normalized = tokens[i].toLowerCase(Locale.ROOT);
-            String overrideTag = TECHNICAL_TERM_TAGS.get(normalized);
-            if (overrideTag != null) {
-                posTags[i] = overrideTag;
+    // ------------------------------------------------------------------
+    // Pipeline
+    // ------------------------------------------------------------------
+
+    private String[] splitSentences(String text) {
+        if (sentenceDetector == null) return new String[] { text };
+        return sentenceDetector.get().sentDetect(text);
+    }
+
+    private void collectFromSentence(String sentence, Map<String, String> out) {
+        String[] tokens = tokenizer.get().tokenize(sentence);
+        if (tokens.length == 0) return;
+
+        if (tokens.length > MAX_TOKENS_PER_SENTENCE) {
+            tokens = Arrays.copyOf(tokens, MAX_TOKENS_PER_SENTENCE);
+        }
+
+        String[] posTags = posTagger.get().tag(tokens);
+        applyTagOverrides(tokens, posTags);
+
+        String[] chunks = chunker.get().chunk(tokens, posTags);
+        int limit = Math.min(chunks.length, tokens.length);   // defensive
+
+        StringBuilder current = new StringBuilder();
+
+        for (int i = 0; i < limit; i++) {
+            String chunkTag = chunks[i];
+
+            if ("B-NP".equals(chunkTag)) {
+                flush(current, out);
+                current.append(tokens[i]);
+            } else if ("I-NP".equals(chunkTag)) {
+                if (current.isEmpty()) {
+                    current.append(tokens[i]);            // I-NP without B-NP
+                } else {
+                    current.append(' ').append(tokens[i]);
+                }
+            } else {
+                flush(current, out);
             }
         }
+        flush(current, out);
+    }
+
+    private void flush(StringBuilder current, Map<String, String> out) {
+        if (current.isEmpty()) return;
+        addCandidate(current.toString(), out);
+        current.setLength(0);
+    }
+
+    /**
+     * Dictionary first (most specific), then shape detection. A token the
+     * dictionary does not know but that looks like an identifier is treated
+     * as a proper noun so the chunker keeps it inside the noun phrase.
+     */
+    private void applyTagOverrides(String[] tokens, String[] posTags) {
+        for (int i = 0; i < tokens.length && i < posTags.length; i++) {
+            String token = tokens[i];
+            String lower = token.toLowerCase(Locale.ROOT);
+
+            String dictionaryTag = TECHNICAL_TERM_TAGS.get(lower);
+            if (dictionaryTag != null) {
+                posTags[i] = dictionaryTag;
+                continue;
+            }
+
+            if (token.length() >= 3
+                    && !NON_IDENTIFIERS.contains(lower)
+                    && CODE_TOKEN.matcher(token).matches()) {
+                posTags[i] = "NNP";
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Phrase cleanup
+    // ------------------------------------------------------------------
+
+    private void addCandidate(String rawPhrase, Map<String, String> out) {
+        String phrase = trimPhraseEdges(rawPhrase);
+        if (phrase.isEmpty()) return;
+
+        String[] words = phrase.split("\\s+");
+        if (words.length > MAX_PHRASE_WORDS)            return;
+        if (phrase.length() < MIN_PHRASE_CHARS)         return;
+        if (phrase.chars().noneMatch(Character::isLetterOrDigit)) return;
+
+        out.putIfAbsent(phrase.toLowerCase(Locale.ROOT), phrase);
+    }
+
+    /**
+     * Strips determiners and pronouns from both ends. Interior function
+     * words are preserved — "index out of bounds" must stay intact.
+     */
+    private String trimPhraseEdges(String phrase) {
+        String trimmed = phrase.trim();
+        if (trimmed.isEmpty()) return "";
+
+        Deque<String> words = new ArrayDeque<>(Arrays.asList(trimmed.split("\\s+")));
+
+        while (!words.isEmpty() && isEdgeNoise(words.peekFirst())) words.pollFirst();
+        while (!words.isEmpty() && isEdgeNoise(words.peekLast()))  words.pollLast();
+
+        return String.join(" ", words);
+    }
+
+    private boolean isEdgeNoise(String word) {
+        String lower = word.toLowerCase(Locale.ROOT);
+        if (EDGE_STOPWORDS.contains(lower)) return true;
+        return word.chars().noneMatch(Character::isLetterOrDigit);   // stray punctuation token
     }
 }

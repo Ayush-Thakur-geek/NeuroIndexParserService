@@ -12,18 +12,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.log4j.Log4j2;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
-import org.apache.lucene.search.IndexSearcher;
-import org.apache.lucene.search.Query;
-import org.apache.lucene.search.ScoreMode;
-import org.apache.lucene.search.SimpleCollector;
+import org.apache.lucene.search.*;
 import org.apache.lucene.util.BytesRef;
 import org.springframework.stereotype.Service;
 import redis.clients.jedis.UnifiedJedis;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -41,15 +35,20 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     private final UnifiedJedis jedis;
     private final ObjectMapper objectMapper;
     private final ConcurrentHashMap<Long, ConcurrentHashMap<String, Integer>> phraseOccurrenceByUser;
+    private DirectoryReader directoryReader;
+    private final SearcherManager searcherManager;
 
     // Tunable constants
-    private static final float THRESHOLD_FILTER_FOR_KEYWORDS;
+//    private static final float THRESHOLD_FILTER_FOR_KEYWORDS;
     private static final int    MIN_KEYWORD_LENGTH          = 3;
     private static final int    MAX_KEYWORD_LENGTH          = 50;
     private static final int    MIN_DOC_FREQUENCY           = 2;   // ignore hapax legomena
     private static final double SCORE_PERCENTILE_THRESHOLD  = 0.60; // keep top 40 % by score mass
     private static final double BM25_K1                     = 1.5;
     private static final double BM25_B                      = 0.75;
+    private static final double MIN_SCORE_RATIO   = 0.35;  // keep terms ≥ 35% of the doc's best
+    private static final double SCORE_MASS_BUDGET = 0.60;
+    private static final int    MAX_KEYWORDS      = 15;    // bounds Redis writes per fragment
     // Replaces the hand-maintained Set.of(...) list. EnglishAnalyzer's bundled
     // stopword set is the SMART list — a standard, well-vetted IR stopword
     // list — so coverage gaps like missing "some"/"here" can't recur silently.
@@ -218,7 +217,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         BODY_FIELD_TYPE.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS);
         BODY_FIELD_TYPE.freeze();
 
-        THRESHOLD_FILTER_FOR_KEYWORDS = 3.0f; // now actually enforced
+//        THRESHOLD_FILTER_FOR_KEYWORDS = 3.0f; // now actually enforced
     }
 
     KeywordExtractionServiceImpl(
@@ -229,7 +228,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
             ObjectMapper objectMapper,
             UnifiedJedis jedis,
             ConcurrentHashMap<Long, ConcurrentHashMap<String, Integer>> phraseOccurrenceByUser
-    ) {
+    ) throws IOException {
         this.indexWriter        = indexWriter;
         this.executorService    = executorService;
         this.keywordAccumulator = keywordAccumulator;
@@ -237,6 +236,9 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         this.objectMapper = objectMapper;
         this.jedis = jedis;
         this.phraseOccurrenceByUser = phraseOccurrenceByUser;
+        // constructor — replaces this.directoryReader = DirectoryReader.open(indexWriter);
+        this.searcherManager = new SearcherManager(indexWriter, true, true, null);
+
     }
 
 // ---------------------------------------------------------------------------
@@ -245,87 +247,81 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 
     @Override
     public void extractingKeyWords(List<LuceneKeywordExtractDTO> batch) {
-
         if (batch == null || batch.isEmpty()) return;
-        try (DirectoryReader directoryReader = DirectoryReader.open(indexWriter)) {
 
-            Map<Long, Integer> fragmentToDocIdMap = buildFragmentDocIdMap(directoryReader, getBatchIds(batch));
+        IndexSearcher searcher;
+        try {
+            searcherManager.maybeRefresh();
+            searcher = searcherManager.acquire();
+        } catch (IOException e) {
+            throw new CustomException(e.getMessage(), "KEYWORD_EXTRACTION_ERROR", 500, e);
+        }
 
-            int   totalDocs    = directoryReader.numDocs();
-            float avgDocLength = computeAverageDocLength(directoryReader);
+        try {
+            IndexReader reader = searcher.getIndexReader();
 
-            // Group touched keywords per user, so computeCentroids only
-            // pushes the fields that actually changed for that user.
+            Map<Long, Integer> fragmentToDocIdMap = buildFragmentDocIdMap(searcher, getBatchIds(batch));
+            int   totalDocs    = reader.numDocs();
+
+            TermVectors termVectors = reader.termVectors();
+            float avgDocLength = computeAverageDocLength(searcher);          // hoisted
+
             Map<Long, Set<String>> touchedKeywordsByUser = new HashMap<>();
 
             for (LuceneKeywordExtractDTO dto : batch) {
+                try {                                                 // per-item isolation
+                    Integer docId = fragmentToDocIdMap.get(dto.getSemanticFragmentId());
+                    if (docId == null || dto.getEmbeddings() == null) continue;
 
-                Integer docId = fragmentToDocIdMap.get(dto.getSemanticFragmentId());
-                if (docId == null) continue;
+                    Terms terms = termVectors.get(docId, "body");
+                    if (terms == null) continue;
 
-                Long userId = dto.getUserId();
+                    int docLength = (int) terms.getSumTotalTermFreq();   // no refetch
 
-                List<String> nounPhrases = fragmentIdToNounPhrase.getOrDefault(
-                        dto.getSemanticFragmentId(),
-                        Collections.emptyList()
-                );
+                    List<KeywordCandidate> candidates =
+                            scoreCandidates(reader, terms, totalDocs, docLength, avgDocLength);
+                    if (candidates.isEmpty()) continue;
 
-                Terms terms = directoryReader.termVectors().get(docId, "body");
-                if (terms == null) continue;
+                    // Normalize ONCE — this form is now the only key used anywhere.
+                    Set<String> selectedKeywords = selectByScoreDistribution(candidates).stream()
+                            .map(KeywordCandidate::keyword)
+                            .map(this::normalizeWords)
+                            .filter(k -> !k.isBlank())
+                            .filter(k -> !STOPWORDS.contains(k))
+                            .collect(Collectors.toSet());
+                    if (selectedKeywords.isEmpty()) continue;
 
-                int docLength = computeDocLength(directoryReader, docId);
+                    Long userId = dto.getUserId();
+                    accumulateEmbeddings(userId, selectedKeywords, dto.getEmbeddings());
+                    touchedKeywordsByUser
+                            .computeIfAbsent(userId, id -> new HashSet<>())
+                            .addAll(selectedKeywords);
 
-                List<KeywordCandidate> candidates =
-                        scoreCandidates(directoryReader, terms, totalDocs, docLength, avgDocLength);
+                    List<String> nounPhrases = fragmentIdToNounPhrase.getOrDefault(
+                            dto.getSemanticFragmentId(), Collections.emptyList());
+                    recordPhraseOccurrences(userId,
+                            filterPhrasesByKeywordOverlap(userId, nounPhrases, selectedKeywords));
 
-                if (candidates.isEmpty()) continue;
+                    fragmentIdToNounPhrase.remove(dto.getSemanticFragmentId());   // stops the leak
 
-                List<KeywordCandidate> selected = selectByScoreDistribution(candidates);
-
-                Set<String> keywordsThisFragment = accumulateEmbeddings(userId, selected, dto.getEmbeddings());
-
-                touchedKeywordsByUser
-                        .computeIfAbsent(userId, id -> new HashSet<>())
-                        .addAll(keywordsThisFragment);
-
-//                log.info("selected keywords: {}", selected);
-
-                Set<String> selectedKeywords = selected.stream()
-                        .map(KeywordCandidate::keyword)
-                        .map(this::normalizeWords)
-                        .collect(Collectors.toSet());
-
-                List<String> validPhrases = filterPhrasesByKeywordOverlap(userId, nounPhrases, selectedKeywords);
-
-                // Phrases are recorded as graph-node candidates only.
-                // No vector is computed or stored for them here.
-                recordPhraseOccurrences(userId, validPhrases);
-
-                log.info("selected keywords: {} validPhrases: {} for text: {}", selectedKeywords, validPhrases, dto.getText());
-
-                String logText =
-                        "selected keywords: " + selectedKeywords
-                                +" \nvalidPhrases: " + validPhrases
-                                + "\nfor text: "
-                                +  dto.getText()
-                                + "\n----------------------------------------------------------\n";
-
-                Files.writeString(
-                        Paths.get("debug.txt"),
-                        logText + System.lineSeparator(),
-                        StandardOpenOption.CREATE,
-                        StandardOpenOption.APPEND
-                );
+                    if (log.isDebugEnabled()) {
+                        log.debug("fragment={} keywords={}", dto.getSemanticFragmentId(), selectedKeywords);
+                    }
+                } catch (Exception perItem) {
+                    log.error("Failed fragment {}", dto.getSemanticFragmentId(), perItem);
+                }
             }
 
-            // Push only the touched keywords per user to Redis.
-            for (Map.Entry<Long, Set<String>> entry : touchedKeywordsByUser.entrySet()) {
-                computeCentroids(entry.getKey(), entry.getValue());
+            for (Map.Entry<Long, Set<String>> e : touchedKeywordsByUser.entrySet()) {
+                computeCentroids(e.getKey(), e.getValue());
             }
-
         } catch (Exception e) {
             log.error("Error extracting keywords", e);
             throw new CustomException(e.getMessage(), "KEYWORD_EXTRACTION_ERROR", 500, e);
+        } finally {
+            try {
+                searcherManager.release(searcher);                     // must be in finally
+            } catch (IOException ignored) { }
         }
     }
 
@@ -448,30 +444,29 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     // Before: iterate maxDoc, read stored fields for every doc, build a global map
 // After: one query for exactly the ids in this batch
 
-    private Map<Long, Integer> buildFragmentDocIdMap(IndexReader reader, Collection<Long> batchIds)
+    private Map<Long, Integer> buildFragmentDocIdMap(IndexSearcher searcher, Collection<Long> batchIds)
             throws IOException {
         if (batchIds.isEmpty()) return Map.of();
 
-        IndexSearcher searcher = new IndexSearcher(reader);
         Query q = LongPoint.newSetQuery("semanticFragmentId",
                 batchIds.stream().mapToLong(Long::longValue).toArray());
 
         Map<Long, Integer> out = new HashMap<>(batchIds.size() * 2);
-        StoredFields storedFields = reader.storedFields();
 
         searcher.search(q, new SimpleCollector() {
             private int docBase;
+            private NumericDocValues fragmentIds;
 
             @Override
-            protected void doSetNextReader(LeafReaderContext ctx) {
-                this.docBase = ctx.docBase;
+            protected void doSetNextReader(LeafReaderContext ctx) throws IOException {
+                this.docBase     = ctx.docBase;
+                this.fragmentIds = ctx.reader().getNumericDocValues("semanticFragmentId_dv");
             }
 
             @Override
             public void collect(int doc) throws IOException {
-                int globalDoc = docBase + doc;
-                IndexableField f = storedFields.document(globalDoc).getField("semanticFragmentId");
-                if (f != null) out.put(f.numericValue().longValue(), globalDoc);
+                if (fragmentIds == null || !fragmentIds.advanceExact(doc)) return;
+                out.put(fragmentIds.longValue(), docBase + doc);   // leaf-local doc for DV, global for the map
             }
 
             @Override
@@ -487,16 +482,14 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 // Step 2a – corpus average document length for BM25
 // ---------------------------------------------------------------------------
 
-    private float computeAverageDocLength(DirectoryReader reader) throws IOException {
-        long totalTokens = 0;
-        int  docCount    = 0;
-        for (int docId = 0; docId < reader.maxDoc(); docId++) {
-            Terms terms = reader.termVectors().get(docId, "body");
-            if (terms == null) continue;
-            totalTokens += terms.getSumTotalTermFreq();
-            docCount++;
-        }
-        return docCount == 0 ? 1.0f : (float) totalTokens / docCount;
+    private float computeAverageDocLength(IndexSearcher searcher) throws IOException {
+        CollectionStatistics stats = searcher.collectionStatistics("body");
+        if (stats == null || stats.docCount() == 0) return 1.0f;
+
+        long sumTtf = stats.sumTotalTermFreq();
+        if (sumTtf <= 0) return 1.0f;          // field indexed without freqs
+
+        return (float) sumTtf / stats.docCount();
     }
 
 // ---------------------------------------------------------------------------
@@ -514,7 +507,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 // ---------------------------------------------------------------------------
 
     private List<KeywordCandidate> scoreCandidates(
-            DirectoryReader reader,
+            IndexReader reader,
             Terms           terms,
             int             totalDocs,
             int             docLength,
@@ -558,7 +551,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
                     bm25Score
             );
 
-            if (bm25Score < THRESHOLD_FILTER_FOR_KEYWORDS) continue;
+//            if (bm25Score < THRESHOLD_FILTER_FOR_KEYWORDS) continue;
 
             candidates.add(new KeywordCandidate(keyword, bm25Score));
         }
@@ -613,22 +606,23 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
      * keeps 2; one with 20 evenly-scored terms keeps ~8–12.
      */
     private List<KeywordCandidate> selectByScoreDistribution(List<KeywordCandidate> candidates) {
-
         if (candidates.isEmpty()) return candidates;
 
-        // Sort descending
-        candidates.sort(Comparator.comparingDouble(KeywordCandidate::score).reversed());
+        List<KeywordCandidate> sorted = new ArrayList<>(candidates);   // don't mutate caller's list
+        sorted.sort(Comparator.comparingDouble(KeywordCandidate::score).reversed());
 
-        double totalScore = candidates.stream().mapToDouble(KeywordCandidate::score).sum();
-        double meanScore  = totalScore / candidates.size();
-        double budget     = totalScore * SCORE_PERCENTILE_THRESHOLD;
+        double maxScore   = sorted.getFirst().score();
+        if (maxScore <= 0) return List.of();
+        double totalScore = sorted.stream().mapToDouble(KeywordCandidate::score).sum();
+        double budget     = totalScore * SCORE_MASS_BUDGET;
 
         List<KeywordCandidate> selected = new ArrayList<>();
         double accumulated = 0.0;
 
-        for (KeywordCandidate c : candidates) {
-            if (accumulated >= budget) break;       // score-mass budget exhausted
-            if (c.score() < meanScore * 0.5) break; // sharp drop-off guard
+        for (KeywordCandidate c : sorted) {
+            if (selected.size() >= MAX_KEYWORDS)          break;
+            if (c.score() / maxScore < MIN_SCORE_RATIO)   break;   // scale-free drop-off
+            if (accumulated >= budget && !selected.isEmpty()) break;
             selected.add(c);
             accumulated += c.score();
         }
@@ -640,15 +634,14 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 // Step 5 – thread-safe embedding accumulation (fixed race condition)
 // ---------------------------------------------------------------------------
 
-    private Set<String> accumulateEmbeddings(Long userId, List<KeywordCandidate> keywords, float[] embedding) {
+    private Set<String> accumulateEmbeddings(Long userId, Set<String> keywords, float[] embedding) {
 
         ConcurrentHashMap<String, KeywordEmbeddingAccumulator> userAccumulator =
                 keywordAccumulator.computeIfAbsent(userId, id -> new ConcurrentHashMap<>());
 
         Set<String> touched = new HashSet<>();
 
-        for (KeywordCandidate candidate : keywords) {
-            String keyword = candidate.keyword();
+        for (String keyword : keywords) {
 
             KeywordEmbeddingAccumulator acc = userAccumulator.computeIfAbsent(
                     keyword,
@@ -673,6 +666,20 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     public void indexing(LuceneIndexDataDTO luceneIndexDataDTO) {
         try {
             Document document = new Document();
+            // in indexing()
+            long fragmentId = luceneIndexDataDTO.getSemanticFragmentId();
+            document.add(
+                    new LongPoint("semanticFragmentId",
+                            fragmentId)
+            );                  // searchable
+            document.add(
+                    new NumericDocValuesField("semanticFragmentId_dv",
+                            fragmentId)
+            );   // fast per-doc read
+            document.add(
+                    new StoredField("semanticFragmentId_store",
+                            fragmentId)
+            );          // keep only if an API response needs it
             document.add(
                     new LongPoint("userId",
                             luceneIndexDataDTO.getUserId())
@@ -698,10 +705,10 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
                             luceneIndexDataDTO.getMessageId())
             );
 
-            document.add(
-                    new LongPoint("semanticFragmentId",
-                            luceneIndexDataDTO.getSemanticFragmentId())
-            );
+//            document.add(
+//                    new LongPoint("semanticFragmentId",
+//                            luceneIndexDataDTO.getSemanticFragmentId())
+//            );
 
             document.add(
                     new StoredField("userId_store",
@@ -728,10 +735,10 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
                             luceneIndexDataDTO.getMessageId())
             );
 
-            document.add(
-                    new StoredField("semanticFragmentId_store",
-                            luceneIndexDataDTO.getSemanticFragmentId())
-            );
+//            document.add(
+//                    new StoredField("semanticFragmentId_store",
+//                            luceneIndexDataDTO.getSemanticFragmentId())
+//            );
 
             document.add(
                     new LongPoint(
@@ -783,13 +790,13 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
             KeywordEmbeddingAccumulator acc = userAccumulator.get(keyword);
             if (acc == null) continue;
 
-            long count = acc.getOccurrenceCount();
-            if (count == 0) continue;
-
-            float[] sum = acc.getEmbeddingSum();
-            float[] centroid = new float[sum.length];
-
+            float[] centroid;
             synchronized (acc) {
+                long count = acc.getOccurrenceCount();
+                if (count == 0) continue;
+
+                float[] sum = acc.getEmbeddingSum();
+                centroid = new float[sum.length];
                 for (int i = 0; i < sum.length; i++) {
                     centroid[i] = sum[i] / count;
                 }

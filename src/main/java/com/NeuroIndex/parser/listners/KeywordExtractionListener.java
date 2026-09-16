@@ -1,6 +1,5 @@
 package com.NeuroIndex.parser.listners;
 
-import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
 import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
 import com.NeuroIndex.parser.service.impl.ClaudeIngestionServiceImpl;
