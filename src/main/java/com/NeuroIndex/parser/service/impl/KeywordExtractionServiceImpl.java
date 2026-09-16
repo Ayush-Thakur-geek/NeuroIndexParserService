@@ -12,6 +12,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.log4j.Log4j2;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreMode;
+import org.apache.lucene.search.SimpleCollector;
 import org.apache.lucene.util.BytesRef;
 import org.springframework.stereotype.Service;
 import redis.clients.jedis.UnifiedJedis;
@@ -245,7 +249,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         if (batch == null || batch.isEmpty()) return;
         try (DirectoryReader directoryReader = DirectoryReader.open(indexWriter)) {
 
-            Map<Long, Integer> fragmentToDocIdMap = buildFragmentDocIdMap(directoryReader);
+            Map<Long, Integer> fragmentToDocIdMap = buildFragmentDocIdMap(directoryReader, getBatchIds(batch));
 
             int   totalDocs    = directoryReader.numDocs();
             float avgDocLength = computeAverageDocLength(directoryReader);
@@ -323,6 +327,14 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
             log.error("Error extracting keywords", e);
             throw new CustomException(e.getMessage(), "KEYWORD_EXTRACTION_ERROR", 500, e);
         }
+    }
+
+    private Collection<Long> getBatchIds(List<LuceneKeywordExtractDTO> batch) {
+        Collection<Long> ids = new HashSet<>();
+        for (LuceneKeywordExtractDTO dto : batch) {
+            ids.add(dto.getSemanticFragmentId());
+        }
+        return ids;
     }
 
     // Per-user record of which phrases exist as graph-node candidates,
@@ -433,16 +445,42 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 // Step 1 – index scan (unchanged shape, extracted for clarity)
 // ---------------------------------------------------------------------------
 
-    private Map<Long, Integer> buildFragmentDocIdMap(DirectoryReader reader) throws IOException {
-        Map<Long, Integer> map = new HashMap<>(reader.maxDoc());
-        for (int docId = 0; docId < reader.maxDoc(); docId++) {
-            Document doc = reader.storedFields().document(docId);
-            String raw   = doc.get("semanticFragmentId_store");
-            if (raw != null) {
-                map.put(Long.parseLong(raw), docId);
+    // Before: iterate maxDoc, read stored fields for every doc, build a global map
+// After: one query for exactly the ids in this batch
+
+    private Map<Long, Integer> buildFragmentDocIdMap(IndexReader reader, Collection<Long> batchIds)
+            throws IOException {
+        if (batchIds.isEmpty()) return Map.of();
+
+        IndexSearcher searcher = new IndexSearcher(reader);
+        Query q = LongPoint.newSetQuery("semanticFragmentId",
+                batchIds.stream().mapToLong(Long::longValue).toArray());
+
+        Map<Long, Integer> out = new HashMap<>(batchIds.size() * 2);
+        StoredFields storedFields = reader.storedFields();
+
+        searcher.search(q, new SimpleCollector() {
+            private int docBase;
+
+            @Override
+            protected void doSetNextReader(LeafReaderContext ctx) {
+                this.docBase = ctx.docBase;
             }
-        }
-        return map;
+
+            @Override
+            public void collect(int doc) throws IOException {
+                int globalDoc = docBase + doc;
+                IndexableField f = storedFields.document(globalDoc).getField("semanticFragmentId");
+                if (f != null) out.put(f.numericValue().longValue(), globalDoc);
+            }
+
+            @Override
+            public ScoreMode scoreMode() {
+                return ScoreMode.COMPLETE_NO_SCORES;
+            }
+        });
+
+        return out;
     }
 
 // ---------------------------------------------------------------------------

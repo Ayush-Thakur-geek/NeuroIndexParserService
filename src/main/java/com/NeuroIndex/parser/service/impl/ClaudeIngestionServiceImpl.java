@@ -4,7 +4,6 @@ import com.NeuroIndex.entity.domainObjects.SemanticUnit;
 import com.NeuroIndex.entity.enums.SemanticContentType;
 import com.NeuroIndex.entity.models.*;
 import com.NeuroIndex.parser.dtos.ClaudeConversationJsonDTO;
-import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
 import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
 import com.NeuroIndex.parser.repositories.AffiliatedEmailsRepo;
 import com.NeuroIndex.parser.repositories.ConversationRepo;
