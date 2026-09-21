@@ -21,4 +21,9 @@ public class AsyncConfig {
     public Executor keywordExtractionExecutor() {
         return executorService;
     }
+
+    @Bean(name = "graphFormationInitiationExecutor")
+    public Executor graphFormationInitiationExecutor() {
+        return executorService;
+    }
 }

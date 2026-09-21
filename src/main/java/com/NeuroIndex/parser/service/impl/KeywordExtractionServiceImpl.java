@@ -2,9 +2,12 @@ package com.NeuroIndex.parser.service.impl;
 
 import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
 import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
+import com.NeuroIndex.parser.dtos.PhraseToNodeDTO;
 import com.NeuroIndex.parser.exception.CustomException;
 import com.NeuroIndex.parser.helperClasses.KeywordCandidate;
 import com.NeuroIndex.parser.helperClasses.KeywordEmbeddingAccumulator;
+import com.NeuroIndex.parser.service.GraphFormationService;
+import com.NeuroIndex.parser.service.HashingSHA256Service;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -37,6 +40,8 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     private final ConcurrentHashMap<Long, ConcurrentHashMap<String, Integer>> phraseOccurrenceByUser;
     private DirectoryReader directoryReader;
     private final SearcherManager searcherManager;
+    private final GraphFormationService graphFormationService;
+    private final HashingSHA256Service hashingService;
 
     // Tunable constants
 //    private static final float THRESHOLD_FILTER_FOR_KEYWORDS;
@@ -227,7 +232,9 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
             ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase,
             ObjectMapper objectMapper,
             UnifiedJedis jedis,
-            ConcurrentHashMap<Long, ConcurrentHashMap<String, Integer>> phraseOccurrenceByUser
+            ConcurrentHashMap<Long, ConcurrentHashMap<String, Integer>> phraseOccurrenceByUser,
+            GraphFormationService graphFormationService,
+            HashingSHA256Service hashingService
     ) throws IOException {
         this.indexWriter        = indexWriter;
         this.executorService    = executorService;
@@ -239,6 +246,8 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         // constructor — replaces this.directoryReader = DirectoryReader.open(indexWriter);
         this.searcherManager = new SearcherManager(indexWriter, true, true, null);
 
+        this.graphFormationService = graphFormationService;
+        this.hashingService = hashingService;
     }
 
 // ---------------------------------------------------------------------------
@@ -299,8 +308,16 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 
                     List<String> nounPhrases = fragmentIdToNounPhrase.getOrDefault(
                             dto.getSemanticFragmentId(), Collections.emptyList());
-                    recordPhraseOccurrences(userId,
+                    HashSet<PhraseToNodeDTO> normalizedPhrases = recordPhraseOccurrences(userId,
                             filterPhrasesByKeywordOverlap(userId, nounPhrases, selectedKeywords));
+
+                    graphFormationService.initialPreparations(
+                            userId,
+                            dto.getSemanticFragmentId(),
+                            normalizedPhrases,
+                            selectedKeywords
+                    );
+
 
                     fragmentIdToNounPhrase.remove(dto.getSemanticFragmentId());   // stops the leak
 
@@ -337,16 +354,25 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     // and how often each was observed. No vector data — vectors are
     // derived on demand from keyword centroids when something needs them.
 
-    private void recordPhraseOccurrences(Long userId, List<String> validPhrases) {
+    private HashSet<PhraseToNodeDTO> recordPhraseOccurrences(Long userId, List<String> validPhrases) {
 
         ConcurrentHashMap<String, Integer> userPhrases =
                 phraseOccurrenceByUser.computeIfAbsent(userId, id -> new ConcurrentHashMap<>());
+        HashSet<PhraseToNodeDTO> normalizedPhrases = new HashSet<>();
 
         for (String phrase : validPhrases) {
             String normalized = normalizePhrase(phrase);
             if (normalized.isEmpty()) continue;
+            PhraseToNodeDTO phraseToNodeDTO = PhraseToNodeDTO.builder()
+                    .userId(userId)
+                    .nounPhrase(normalized)
+                    .hash(hashingService.hash(normalized))
+                    .build();
+            normalizedPhrases.add(phraseToNodeDTO);
+
             userPhrases.merge(normalized, 1, Integer::sum);
         }
+        return normalizedPhrases;
     }
 
     /**
@@ -398,6 +424,8 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
             // normalizePhrase() used everywhere else in the pipeline.
             String normalizedPhrase = normalizePhrase(phrase);
 
+            mappingKeywordsToPhrase(userId, matchedKeywords, normalizedPhrase);
+
             try {
                 // Merge with any existing matched keywords for this phrase
                 // across previous batches — same fragment can re-appear
@@ -429,6 +457,20 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 
         log.info("validPhrases: {}", validPhrases);
         return validPhrases;
+    }
+
+    private void mappingKeywordsToPhrase(long userId, List<String> keywords, String phrase) {
+        String redisKey = "wordsToPhrases:user:" + userId;
+        for  (String keyword : keywords) {
+            String normalizedKey = normalizeWords(keyword);
+            if (normalizedKey.isEmpty()) continue;
+            try {
+                String savedPhrase = objectMapper.writeValueAsString(phrase);
+                jedis.hset(redisKey, normalizedKey, objectMapper.writeValueAsString(savedPhrase));
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
+        }
     }
 
     private String normalizeWords(String word) {
