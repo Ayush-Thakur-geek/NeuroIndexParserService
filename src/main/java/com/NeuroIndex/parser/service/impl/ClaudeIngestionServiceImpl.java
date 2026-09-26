@@ -5,6 +5,7 @@ import com.NeuroIndex.entity.enums.SemanticContentType;
 import com.NeuroIndex.entity.models.*;
 import com.NeuroIndex.parser.dtos.ClaudeConversationJsonDTO;
 import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
+import com.NeuroIndex.parser.eventRecords.KeywordExtractionEvent;
 import com.NeuroIndex.parser.repositories.AffiliatedEmailsRepo;
 import com.NeuroIndex.parser.repositories.ConversationRepo;
 import com.NeuroIndex.parser.repositories.MessageRepo;
@@ -16,12 +17,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.transaction.Transactional;
 import lombok.extern.log4j.Log4j2;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 
@@ -36,7 +40,10 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     private final ObjectMapper objectMapper;
     private final SemanticFragmentationService semanticFragmentationService;
     private final ApplicationEventPublisher eventPublisher;
-    private final KeyWordExtractionService keyWordExtractionService;
+    private final KeyWordExtractionService keywordExtractionService;
+    private final Executor keywordExtractionExecutor;
+
+    private static final int KEYWORD_EXTRACTION_BATCH_SIZE = 100;
 
     ClaudeIngestionServiceImpl(ConversationRepo conversationRepo,
                                MessageRepo messageRepo,
@@ -44,16 +51,19 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                                ExecutorService executorService,
                                ObjectMapper objectMapper,
                                SemanticFragmentationService semanticFragmentationService,
-                               KeyWordExtractionService keyWordExtractionService,
-                               ApplicationEventPublisher eventPublisher) {
+                               KeyWordExtractionService keywordExtractionService,
+                               ApplicationEventPublisher eventPublisher,
+                               @Qualifier("keywordExtractionExecutor")
+                               Executor keywordExtractionExecutor) {
         this.conversationRepo = conversationRepo;
         this.messageRepo = messageRepo;
         this.affiliatedEmailRepo = affiliatedEmailRepo;
         this.executorService = executorService;
         this.objectMapper = objectMapper;
         this.semanticFragmentationService = semanticFragmentationService;
-        this.keyWordExtractionService = keyWordExtractionService;
+        this.keywordExtractionService = keywordExtractionService;
         this.eventPublisher = eventPublisher;
+        this.keywordExtractionExecutor = keywordExtractionExecutor;
     }
 
     @Transactional
@@ -119,51 +129,103 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         return conversationsToSave;
     }
 
-    public void keywordExtractionInitiation(AffiliatedEmail affiliatedEmail, List<Conversation> conversations) {
+    public CompletableFuture<Void> keywordExtractionInitiation(
+            AffiliatedEmail affiliatedEmail,
+            List<Conversation> conversations
+    ) {
+        if (affiliatedEmail == null || conversations == null || conversations.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
         LLm llm = affiliatedEmail.getLlm();
+
+        if (llm == null || llm.getUser() == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException(
+                            "Affiliated email is not connected to an LLM and user"
+                    )
+            );
+        }
+
         User user = llm.getUser();
 
-        List<LuceneKeywordExtractDTO> extractionTasks =
+        List<LuceneKeywordExtractDTO> extractionItems =
+                buildKeywordExtractionItems(user, llm, conversations);
+
+        if (extractionItems.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        List<CompletableFuture<Void>> tasks = new ArrayList<>();
+
+        for (int start = 0;
+             start < extractionItems.size();
+             start += KEYWORD_EXTRACTION_BATCH_SIZE) {
+
+            int end = Math.min(
+                    start + KEYWORD_EXTRACTION_BATCH_SIZE,
+                    extractionItems.size()
+            );
+
+            /*
+             * Make an independent copy. Do not give an asynchronous task a
+             * subList backed by the mutable extractionItems list.
+             */
+            List<LuceneKeywordExtractDTO> batch =
+                    List.copyOf(extractionItems.subList(start, end));
+
+            CompletableFuture<Void> task = CompletableFuture.runAsync(
+                    () -> keywordExtractionService.extractingKeyWords(batch),
+                    keywordExtractionExecutor
+            );
+
+            tasks.add(task);
+        }
+
+        return CompletableFuture.allOf(
+                tasks.toArray(CompletableFuture[]::new)
+        );
+    }
+
+    private List<LuceneKeywordExtractDTO> buildKeywordExtractionItems(
+            User user,
+            LLm llm,
+            List<Conversation> conversations
+    ) {
+        List<LuceneKeywordExtractDTO> extractionItems =
                 new ArrayList<>();
 
         for (Conversation conversation : conversations) {
+            if (conversation == null || conversation.getMessages() == null) {
+                continue;
+            }
 
-            List<Message> messages =
-                    conversation.getMessages();
+            for (Message message : conversation.getMessages()) {
+                if (message == null || message.getSemanticFragments() == null) {
+                    continue;
+                }
 
-            for (Message message : messages) {
+                for (SemanticFragment fragment : message.getSemanticFragments()) {
+                    if (fragment == null || fragment.getId() == null) {
+                        continue;
+                    }
 
-                List<SemanticFragment> semanticFragments =
-                        message.getSemanticFragments();
-
-                for (SemanticFragment semanticFragment :
-                        semanticFragments) {
-
-                    extractionTasks.add(
+                    extractionItems.add(
                             LuceneKeywordExtractDTO.builder()
                                     .userId(user.getId())
                                     .llmId(llm.getId())
                                     .conversationId(conversation.getId())
                                     .messageId(message.getId())
-                                    .semanticFragmentId(
-                                            semanticFragment.getId()
-                                    )
-                                    .text(semanticFragment.getText())
-                                    .embeddings(semanticFragment.getEmbedding())
+                                    .semanticFragmentId(fragment.getId())
+                                    .text(fragment.getText())
+                                    .embeddings(fragment.getEmbedding())
                                     .build()
                     );
                 }
             }
         }
 
-        eventPublisher.publishEvent(
-                new KeywordExtractionEvent(extractionTasks)
-        );
-    }
-
-    public record KeywordExtractionEvent(
-            List<LuceneKeywordExtractDTO> tasks
-    ) {
+        return extractionItems;
     }
 
     private Conversation buildConversation(

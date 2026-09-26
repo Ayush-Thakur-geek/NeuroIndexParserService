@@ -5,17 +5,18 @@ import com.NeuroIndex.entity.models.AffiliatedEmail;
 import com.NeuroIndex.entity.models.Conversation;
 import com.NeuroIndex.entity.models.LLm;
 import com.NeuroIndex.entity.models.User;
-import com.NeuroIndex.parser.config.ExecutorServiceConfig;
 import com.NeuroIndex.parser.dtos.ClaudeConversationJsonDTO;
 import com.NeuroIndex.parser.dtos.ExtractionFileDTO;
 import com.NeuroIndex.parser.dtos.UserJsonDTO;
 import com.NeuroIndex.parser.exception.CustomException;
+import com.NeuroIndex.parser.eventRecords.GraphFormationInitiationEvent;
 import com.NeuroIndex.parser.repositories.AffiliatedEmailsRepo;
 import com.NeuroIndex.parser.repositories.LlmsRepo;
 import com.NeuroIndex.parser.repositories.UserRepo;
 import com.NeuroIndex.parser.service.ClaudeIngestionService;
 import com.NeuroIndex.parser.service.ExportFileIngestionService;
 import lombok.extern.log4j.Log4j2;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -25,6 +26,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 @Log4j2
@@ -35,17 +37,19 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
     private final LlmsRepo llmsRepo;
     private final ObjectMapper objectMapper;
     private final ClaudeIngestionService claudeIngestionService;
+    private final ApplicationEventPublisher eventPublisher;
 
     public ExportFileIngestionServiceImpl(UserRepo userRepo,
                                           AffiliatedEmailsRepo affiliatedEmailsRepo,
                                           LlmsRepo llmsRepo,
                                           ObjectMapper objectMapper,
-                                          ClaudeIngestionService claudeIngestionService) {
+                                          ClaudeIngestionService claudeIngestionService, ApplicationEventPublisher eventPublisher) {
         this.userRepo = userRepo;
         this.affiliatedEmailsRepo = affiliatedEmailsRepo;
         this.llmsRepo = llmsRepo;
         this.objectMapper = objectMapper;
         this.claudeIngestionService = claudeIngestionService;
+        this.eventPublisher = eventPublisher;
     }
     @Override
     public void extractUserInfo(ExtractionFileDTO extractionFileDTO) throws IOException {
@@ -189,7 +193,28 @@ public class ExportFileIngestionServiceImpl implements ExportFileIngestionServic
                 }
             }
 
-            claudeIngestionService.keywordExtractionInitiation(affiliatedEmail, conversations);
+            CompletableFuture<Void> keywordExtractionFuture =
+                    claudeIngestionService.keywordExtractionInitiation(
+                            affiliatedEmail,
+                            conversations
+                    );
+
+            keywordExtractionFuture.whenComplete((ignored, exception) -> {
+                if (exception != null) {
+                    log.error(
+                            "Keyword extraction failed for user={}",
+                            user.getId(),
+                            exception
+                    );
+                    return;
+                }
+
+                eventPublisher.publishEvent(
+                        new GraphFormationInitiationEvent(
+                                user.getId()
+                        )
+                );
+            });
 
         } catch (CustomException e) {
             throw e;

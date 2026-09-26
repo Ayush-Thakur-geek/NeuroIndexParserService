@@ -9,8 +9,14 @@ import java.util.List;
 @AllArgsConstructor
 @NoArgsConstructor
 @Builder
+@EqualsAndHashCode(onlyExplicitlyIncluded = true)
 public class PhraseToNodeDTO {
-    private long userId;
+
+    @EqualsAndHashCode.Include
+    private Long userId;
+
+    @EqualsAndHashCode.Include
     private String nounPhrase;
+
     private String hash;
 }

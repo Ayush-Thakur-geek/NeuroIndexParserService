@@ -4,6 +4,7 @@ import com.NeuroIndex.parser.dtos.PhraseToNodeDTO;
 import com.NeuroIndex.parser.service.GraphFormationService;
 import com.NeuroIndex.parser.service.HashingSHA256Service;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
 import redis.clients.jedis.UnifiedJedis;
 
@@ -11,6 +12,7 @@ import java.util.*;
 
 @Service
 @RequiredArgsConstructor
+@Log4j2
 public class GraphFormationServiceImpl implements GraphFormationService {
 
     private final UnifiedJedis jedis;
@@ -130,6 +132,16 @@ public class GraphFormationServiceImpl implements GraphFormationService {
                 }
             }
         }
+    }
+
+    @Override
+    public void initiateGraphFormation(Long userId) {
+        log.info("Started with the graph formation for user id: {}", userId);
+        int report = directEdgeFormation(userId);
+    }
+
+    private int directEdgeFormation(Long userId) {
+
     }
 
     private String canonicalPair(String first, String second) {

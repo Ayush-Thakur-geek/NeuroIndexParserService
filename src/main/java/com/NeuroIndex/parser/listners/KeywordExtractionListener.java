@@ -1,11 +1,10 @@
 package com.NeuroIndex.parser.listners;
 
 import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
+import com.NeuroIndex.parser.eventRecords.KeywordExtractionEvent;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
-import com.NeuroIndex.parser.service.impl.ClaudeIngestionServiceImpl;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
@@ -19,7 +18,6 @@ import java.util.List;
 public class KeywordExtractionListener {
 
     private final KeyWordExtractionService keyWordExtractionService;
-    private final ApplicationEventPublisher eventPublisher;
     private static final int BATCH_SIZE = 50;
 
     @Async("keywordExtractionExecutor")
@@ -27,7 +25,7 @@ public class KeywordExtractionListener {
             phase = TransactionPhase.AFTER_COMMIT
     )
     public void handleKeywordExtraction(
-            ClaudeIngestionServiceImpl.KeywordExtractionEvent event
+            KeywordExtractionEvent event
     ) {
 
         List<LuceneKeywordExtractDTO> tasks = event.tasks();
@@ -54,11 +52,6 @@ public class KeywordExtractionListener {
                 );
             }
 
-            eventPublisher.publishEvent(new GraphFormationInitiationEvent(userId));
         }
-    }
-
-    public record GraphFormationInitiationEvent(Long userId) {
-
     }
 }
