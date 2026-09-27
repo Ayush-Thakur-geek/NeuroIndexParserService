@@ -17,5 +17,6 @@ public class LuceneIndexDataDTO {
     private Long messageId;
     private Long semanticFragmentId;
     private String text;
+    private float[] embeddings;
     List<String> nounPhrases;
 }

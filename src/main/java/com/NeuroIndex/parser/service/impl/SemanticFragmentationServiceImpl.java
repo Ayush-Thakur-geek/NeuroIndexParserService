@@ -6,6 +6,7 @@ import com.NeuroIndex.entity.enums.SemanticContentType;
 import com.NeuroIndex.entity.models.*;
 import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
 import com.NeuroIndex.parser.repositories.MessageRepo;
+import com.NeuroIndex.parser.repositories.SemanticFragmentInsertRepository;
 import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.service.EmbeddingService;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
@@ -14,6 +15,7 @@ import com.NeuroIndex.parser.service.SemanticFragmentationService;
 import jakarta.transaction.Transactional;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -33,6 +35,7 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
     private final KeyWordExtractionService  keyWordExtractionService;
     private final MessageRepo messageRepo;
     private final NounPhraseExtractor nounPhraseExtractor;
+    private final SemanticFragmentInsertRepository semanticFragmentInsertRepository;
 
     public static final float MAX_DRIFT = 0.25f;
     private static final Pattern CODE_KEYWORDS = Pattern.compile(
@@ -57,7 +60,7 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
             SemanticFragmentRepo semanticFragmentRepo,
             KeyWordExtractionService keyWordExtractionService,
             MessageRepo messageRepo,
-            NounPhraseExtractor nounPhraseExtractor
+            NounPhraseExtractor nounPhraseExtractor, SemanticFragmentInsertRepository semanticFragmentInsertRepository
     ) {
         this.executorService = executorService;
         this.embeddingService = embeddingService;
@@ -65,6 +68,7 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
         this.keyWordExtractionService = keyWordExtractionService;
         this.messageRepo = messageRepo;
         this.nounPhraseExtractor = nounPhraseExtractor;
+        this.semanticFragmentInsertRepository = semanticFragmentInsertRepository;
     }
 
     @Override
@@ -438,7 +442,7 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
         return similarity;
     }
 
-    @Transactional
+
     protected SemanticFragment saveFragment(
             String text,
             Message message,
@@ -446,49 +450,96 @@ public class SemanticFragmentationServiceImpl implements SemanticFragmentationSe
             int chunkCount,
             float similarity
     ) {
-        if (message.getId() == null) {
-            throw new RuntimeException(
+        if (message == null || message.getId() == null) {
+            throw new IllegalStateException(
                     "Message ID is null during fragment save"
             );
         }
 
+        String hash =
+                hashChunk(message, chunkCount, text);
 
-        //Subject for removal after implementation of jwt
-        String hash = hashChunk(message, chunkCount, text);
-        Conversation conversation = message.getConversation();
-        AffiliatedEmail affiliatedEmail = conversation.getAffiliatedEmail();
-        LLm llm = affiliatedEmail.getLlm();
-        User user = llm.getUser();
-        //-------------------------------------------------------
+        Conversation conversation =
+                message.getConversation();
 
-        List<String> nounPhrases = nounPhraseExtractor.extractNounPhrase(text);
+        AffiliatedEmail affiliatedEmail =
+                conversation.getAffiliatedEmail();
 
-        log.info("Noun phrases -> {}", nounPhrases);
+        LLm llm =
+                affiliatedEmail.getLlm();
 
-        SemanticFragment semanticFragment = SemanticFragment.builder()
-                .message(message)
-                .text(text)
-                .embedding(embedding)
-                .hash(hash)
-                .fragmentOrder(chunkCount)
-                .confidenceScore(1f - similarity)
-                .nounPhrases(nounPhrases)
-                .build();
-        semanticFragmentRepo.save(semanticFragment);
+        User user =
+                llm.getUser();
 
-        LuceneIndexDataDTO luceneIndexDataDTO = LuceneIndexDataDTO.builder()
-                .userId(user.getId())
-                .llmId(llm.getId())
-                .affiliatedEmailId(affiliatedEmail.getId())
-                .conversationId(conversation.getId())
-                .messageId(message.getId())
-                .semanticFragmentId(semanticFragment.getId())
-                .text(semanticFragment.getText())
-                .nounPhrases(nounPhrases)
-                .build();
+        List<String> nounPhrases =
+                nounPhraseExtractor.extractNounPhrase(text);
 
-        keyWordExtractionService.indexing(luceneIndexDataDTO);
-        return semanticFragment;
+        Long generatedFragmentId =
+                semanticFragmentInsertRepository.insertFragment(
+                        user.getId(),
+                        message.getId(),
+                        text,
+                        Arrays.toString(embedding),
+                        hash,
+                        chunkCount,
+                        1.0f - similarity
+                );
+
+        if (generatedFragmentId == null) {
+            throw new IllegalStateException(
+                    "Database did not return a semantic fragment ID"
+            );
+        }
+
+        log.info(
+                "Inserted semantic fragment id={}",
+                generatedFragmentId
+        );
+
+        /*
+         * Load the row inserted by native SQL.
+         * This returns a managed entity containing the database timestamps.
+         */
+        SemanticFragment persistedFragment =
+                semanticFragmentRepo.findById(generatedFragmentId)
+                        .orElseThrow(() ->
+                                new IllegalStateException(
+                                        "Inserted semantic fragment not found: "
+                                                + generatedFragmentId
+                                )
+                        );
+
+        /*
+         * Only do this if nounPhrases is @Transient or if changes to it
+         * are meant to be persisted.
+         */
+        persistedFragment.setNounPhrases(nounPhrases);
+
+        LuceneIndexDataDTO luceneIndexDataDTO =
+                LuceneIndexDataDTO.builder()
+                        .semanticFragmentId(generatedFragmentId)
+                        .userId(user.getId())
+                        .llmId(llm.getId())
+                        .affiliatedEmailId(affiliatedEmail.getId())
+                        .conversationId(conversation.getId())
+                        .messageId(message.getId())
+                        .text(text)
+                        .nounPhrases(nounPhrases)
+                        .embeddings(embedding)
+                        .build();
+
+        log.info(
+                "Transaction active = {}",
+                TransactionSynchronizationManager.isActualTransactionActive()
+        );
+
+        keyWordExtractionService.indexing(
+                luceneIndexDataDTO
+        );
+
+        log.info("Lucene indexing completed");
+
+        return persistedFragment;
     }
 
     private String hashChunk(

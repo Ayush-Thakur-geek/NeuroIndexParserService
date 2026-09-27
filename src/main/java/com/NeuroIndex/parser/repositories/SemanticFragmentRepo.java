@@ -8,6 +8,8 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.List;
+
 @Repository
 public interface SemanticFragmentRepo extends JpaRepository<SemanticFragment, Long> {
 
@@ -45,4 +47,6 @@ public interface SemanticFragmentRepo extends JpaRepository<SemanticFragment, Lo
             @Param("fragmentOrder") Integer fragmentOrder,
             @Param("confidenceScore") Float confidenceScore
     );
+
+    public List<SemanticFragment> findAllByUserId(Long userId);
 }

@@ -20,7 +20,12 @@ import org.apache.lucene.util.BytesRef;
 import org.springframework.stereotype.Service;
 import redis.clients.jedis.UnifiedJedis;
 
+import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -318,6 +323,21 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
                             selectedKeywords
                     );
 
+                    String logText = "Selected keywords: " + selectedKeywords
+                            + "\nvalid phrases: " + normalizedPhrases.stream()
+                            .map(PhraseToNodeDTO::getNounPhrase)
+                            .collect(Collectors.toList())
+                            + "\noriginal text: " + dto.getText()
+                            + "\n--------------------------------------------------------------------------------------";
+
+                    Files.writeString(
+                            Paths.get("debug.txt"),
+                            logText + System.lineSeparator(),
+                            StandardOpenOption.CREATE,
+                            StandardOpenOption.APPEND
+                    );
+
+
 
                     fragmentIdToNounPhrase.remove(dto.getSemanticFragmentId());   // stops the leak
 
@@ -388,7 +408,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
      * keyword to survive — same permissive threshold as before, since
      * BM25 selection is already the quality gate upstream.
      */
-    private List<String> filterPhrasesByKeywordOverlap(
+    private synchronized List<String> filterPhrasesByKeywordOverlap(
             long userId,
             List<String> nounPhrases,
             Set<String> selectedKeywords
@@ -862,11 +882,19 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
     public float[] getPhraseCentroid(Long userId, String phrase) throws JsonProcessingException {
 
         String redisKey = "centroids:user:" + userId;
-        String[] words = normalizePhrase(phrase).split(" ");
 
         List<float[]> wordCentroids = new ArrayList<>();
 
-        for (String word : words) {
+        String redisKeyForGettingKeywords = "phrases:user:" + userId;
+
+        String keyWordJson = jedis.hget(redisKeyForGettingKeywords, phrase);
+
+        List<String> keywords = new ArrayList<>();
+        if (keyWordJson != null) {
+            keywords = objectMapper.readValue(keyWordJson, List.class);
+        }
+
+        for (String word : keywords) {
             String json = jedis.hget(redisKey, word);
             if (json == null) continue;
             wordCentroids.add(objectMapper.readValue(json, float[].class));

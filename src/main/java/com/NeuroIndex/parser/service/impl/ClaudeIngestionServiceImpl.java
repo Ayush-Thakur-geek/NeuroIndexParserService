@@ -9,17 +9,23 @@ import com.NeuroIndex.parser.eventRecords.KeywordExtractionEvent;
 import com.NeuroIndex.parser.repositories.AffiliatedEmailsRepo;
 import com.NeuroIndex.parser.repositories.ConversationRepo;
 import com.NeuroIndex.parser.repositories.MessageRepo;
+import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.service.ClaudeIngestionService;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
 import com.NeuroIndex.parser.service.SemanticFragmentationService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.EntityManager;
 import jakarta.transaction.Transactional;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -28,6 +34,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
+
+import static jakarta.transaction.Status.STATUS_COMMITTED;
+import static org.springframework.transaction.support.TransactionSynchronization.STATUS_ROLLED_BACK;
 
 @Service
 @Log4j2
@@ -42,6 +51,9 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     private final ApplicationEventPublisher eventPublisher;
     private final KeyWordExtractionService keywordExtractionService;
     private final Executor keywordExtractionExecutor;
+    private final SemanticFragmentRepo semanticFragmentRepo;
+    private final EntityManager entityManager;
+    private final JdbcTemplate jdbcTemplate;
 
     private static final int KEYWORD_EXTRACTION_BATCH_SIZE = 100;
 
@@ -54,7 +66,7 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
                                KeyWordExtractionService keywordExtractionService,
                                ApplicationEventPublisher eventPublisher,
                                @Qualifier("keywordExtractionExecutor")
-                               Executor keywordExtractionExecutor) {
+                               Executor keywordExtractionExecutor, SemanticFragmentRepo semanticFragmentRepo, EntityManager entityManager, JdbcTemplate jdbcTemplate) {
         this.conversationRepo = conversationRepo;
         this.messageRepo = messageRepo;
         this.affiliatedEmailRepo = affiliatedEmailRepo;
@@ -64,6 +76,9 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         this.keywordExtractionService = keywordExtractionService;
         this.eventPublisher = eventPublisher;
         this.keywordExtractionExecutor = keywordExtractionExecutor;
+        this.semanticFragmentRepo = semanticFragmentRepo;
+        this.entityManager = entityManager;
+        this.jdbcTemplate = jdbcTemplate;
     }
 
     @Transactional
@@ -71,6 +86,34 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
             AffiliatedEmail affiliatedEmail,
             List<ClaudeConversationJsonDTO> conversationsDTO
     ) throws JsonProcessingException {
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(
+                    new TransactionSynchronization() {
+
+                        @Override
+                        public void afterCommit() {
+                            log.info(
+                                    "Claude ingestion transaction committed"
+                            );
+                        }
+
+                        @Override
+                        public void afterCompletion(int status) {
+                            String result = switch (status) {
+                                case STATUS_COMMITTED -> "COMMITTED";
+                                case STATUS_ROLLED_BACK -> "ROLLED_BACK";
+                                default -> "UNKNOWN";
+                            };
+
+                            log.info(
+                                    "Claude ingestion transaction completed: {}",
+                                    result
+                            );
+                        }
+                    }
+            );
+        }
 
         Set<String> existingConversationHashes =
                 conversationRepo.findAllHashes();
@@ -81,17 +124,16 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         List<Conversation> conversationsToSave =
                 new ArrayList<>();
 
-        // map to hold messages and their semantic units
-        // so we can fragment after persist
         Map<Message, List<SemanticUnit>> fragmentationQueue =
                 new LinkedHashMap<>();
 
         for (ClaudeConversationJsonDTO dto : conversationsDTO) {
-
             String conversationHash =
                     hashConversation(dto);
 
-            if (existingConversationHashes.contains(conversationHash)) {
+            if (existingConversationHashes.contains(
+                    conversationHash
+            )) {
                 continue;
             }
 
@@ -113,18 +155,73 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
             conversation.setMessages(messages);
 
             conversationsToSave.add(conversation);
-
             existingConversationHashes.add(conversationHash);
         }
 
-        // persist first — messages get their IDs here
-        conversationRepo.saveAllAndFlush(conversationsToSave);
+        /*
+         * Persist conversations and messages first so message IDs exist.
+         */
+        conversationRepo.saveAllAndFlush(
+                conversationsToSave
+        );
 
-        // fragment after persist — message IDs now exist in db
+        /*
+         * Native fragment inserts execute immediately.
+         */
         fragmentationQueue.forEach(
                 semanticFragmentationService::messageSemanticFragmentation
         );
 
+        /*
+         * A JdbcTemplate query does not trigger a Hibernate automatic flush.
+         * It shows the rows produced by the native inserts.
+         */
+        Long fragmentsBeforeFlush =
+                jdbcTemplate.queryForObject(
+                        """
+                        SELECT COUNT(*)
+                        FROM public.semantic_fragments
+                        """,
+                        Long.class
+                );
+
+        log.info(
+                "Semantic fragment count before Hibernate flush: {}",
+                fragmentsBeforeFlush
+        );
+
+        log.info(
+                "Transaction rollback-only before flush: {}",
+                TransactionAspectSupport
+                        .currentTransactionStatus()
+                        .isRollbackOnly()
+        );
+
+        /*
+         * Flush pending Hibernate entity/relationship changes.
+         */
+        entityManager.flush();
+
+        Long fragmentsAfterFlush =
+                jdbcTemplate.queryForObject(
+                        """
+                        SELECT COUNT(*)
+                        FROM public.semantic_fragments
+                        """,
+                        Long.class
+                );
+
+        log.info(
+                "Semantic fragment count after Hibernate flush: {}",
+                fragmentsAfterFlush
+        );
+
+        log.info(
+                "Transaction rollback-only after flush: {}",
+                TransactionAspectSupport
+                        .currentTransactionStatus()
+                        .isRollbackOnly()
+        );
 
         return conversationsToSave;
     }
