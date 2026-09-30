@@ -10,7 +10,9 @@ import com.NeuroIndex.parser.repositories.SemanticFragmentNodeRepo;
 import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.repositories.SemanticNodeRepo;
 import com.NeuroIndex.parser.service.GraphFormationService;
+import com.NeuroIndex.parser.service.HashingSHA256Service;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
@@ -27,6 +29,8 @@ import java.util.stream.Collectors;
 @Log4j2
 public class GraphFormationServiceImpl implements GraphFormationService {
 
+    private static final int GRAPH_BATCH_SIZE = 100;
+
     private static final String FRAGMENT_NODES_KEY =
             "graph:fragment:nodes:";
 
@@ -36,12 +40,19 @@ public class GraphFormationServiceImpl implements GraphFormationService {
     private static final String DIRECT_EDGE_COUNTS_KEY =
             "graph:direct:counts:";
 
+    private static final String PHRASES_TO_KEYWORDS_KEY =
+            "phrasesToKeywords:user:";
+
+    private static final String WORD_TO_PHRASE =
+            "wordsToPhrases:user:";
+
     private final UnifiedJedis jedis;
     private final SemanticFragmentRepo semanticFragmentRepo;
     private final SemanticNodeRepo semanticNodeRepo;
     private final SemanticFragmentNodeRepo semanticFragmentNodeRepo;
     private final SemanticEdgeRepo semanticEdgeRepo;
     private final ObjectMapper objectMapper;
+    private final HashingSHA256Service hashingService;
 
     @Override
     public void initialPreparations(
@@ -150,7 +161,10 @@ public class GraphFormationServiceImpl implements GraphFormationService {
 
     @Override
     @Transactional
-    public void initiateGraphFormation(Long userId) throws JsonProcessingException {
+    public void initiateGraphFormation(
+            Long userId
+    ) throws JsonProcessingException {
+
         if (userId == null) {
             throw new IllegalArgumentException(
                     "User ID is required for graph formation"
@@ -162,24 +176,162 @@ public class GraphFormationServiceImpl implements GraphFormationService {
                 userId
         );
 
-        GraphFormationReport report =
-                directEdgeFormation(userId);
+        List<SemanticFragment> fragments =
+                semanticFragmentRepo.findAllByUserId(
+                        userId
+                );
+
+        if (fragments == null || fragments.isEmpty()) {
+            log.info(
+                    "No semantic fragments found for userId={}",
+                    userId
+            );
+            return;
+        }
+
+        int fragmentsSize = fragments.size();
+
+        /*
+         * Pass 1:
+         * Create phrase nodes, fragment-node mappings, and direct edges.
+         */
+        int directBatchNumber = 1;
+
+        String directCountsKey =
+                directEdgeCountsKey(userId);
+
+        Map<String, String> directCounts =
+                jedis.hgetAll(directCountsKey);
+
+        for (int start = 0;
+             start < fragmentsSize;
+             start += GRAPH_BATCH_SIZE) {
+
+            int end = Math.min(
+                    start + GRAPH_BATCH_SIZE,
+                    fragmentsSize
+            );
+
+            List<SemanticFragment> fragmentBatch =
+                    List.copyOf(
+                            fragments.subList(start, end)
+                    );
+
+            GraphFormationReport report =
+                    directEdgeFormation(
+                            userId,
+                            fragmentBatch,
+                            directCounts
+                    );
+
+            log.info(
+                    "Completed direct graph batch {} for userId={}. "
+                            + "range=[{}, {}), nodes={}, "
+                            + "fragmentMappings={}, directEdges={}",
+                    directBatchNumber,
+                    userId,
+                    start,
+                    end,
+                    report.nodesProcessed(),
+                    report.fragmentMappingsCreated(),
+                    report.edgesProcessed()
+            );
+
+            directBatchNumber++;
+        }
+
+        /*
+         * Pass 2:
+         * Build indirect edges only after all nodes and mappings exist.
+         *
+         * The supplied fragments can be batched as source work, but
+         * indirectEdgeFormation must search candidates across the complete
+         * user graph—not only within fragmentBatch.
+         */
+        int indirectBatchNumber = 1;
+
+
+        String labelsKey =
+                nodeLabelsKey(userId);
+
+        String phraseToKeywordsKey =
+                phrasesToKeywordsKey(userId);
+
+        String wordToPhrasesKey =
+                wordToPhrasesKey(userId);
+
+        /*
+         * Three Redis calls for this batch rather than calls inside every
+         * phrase/keyword loop.
+         */
+        Map<String, String> labelsByHash =
+                jedis.hgetAll(labelsKey);
+
+        Map<String, String> keywordsJsonByPhrase =
+                jedis.hgetAll(phraseToKeywordsKey);
+
+        Map<String, String> phrasesJsonByKeyword =
+                jedis.hgetAll(wordToPhrasesKey);
+
+        Map<String, Set<String>> keywordsByPhrase =
+                deserializeStringSetMap(
+                        keywordsJsonByPhrase
+                );
+
+        Map<String, Set<String>> phrasesByKeyword =
+                deserializeStringSetMap(
+                        phrasesJsonByKeyword
+                );
+
+        for (int start = 0;
+             start < fragmentsSize;
+             start += GRAPH_BATCH_SIZE) {
+
+            int end = Math.min(
+                    start + GRAPH_BATCH_SIZE,
+                    fragmentsSize
+            );
+
+            List<SemanticFragment> fragmentBatch =
+                    List.copyOf(
+                            fragments.subList(start, end)
+                    );
+
+            GraphFormationReport report =
+                    indirectEdgeFormation(
+                            userId,
+                            fragmentBatch,
+                            phrasesByKeyword,
+                            keywordsByPhrase,
+                            labelsByHash
+                    );
+
+            log.info(
+                    "Completed indirect graph batch {} for userId={}. "
+                            + "range=[{}, {}), nodes={}, "
+                            + "fragmentMappings={}, indirectEdges={}",
+                    indirectBatchNumber,
+                    userId,
+                    start,
+                    end,
+                    report.nodesProcessed(),
+                    report.fragmentMappingsCreated(),
+                    report.edgesProcessed()
+            );
+
+            indirectBatchNumber++;
+        }
 
         log.info(
-                "Completed graph formation for userId={}. " +
-                        "nodes={}, fragmentMappings={}, directEdges={}",
+                "Completed complete graph formation for userId={}, fragments={}",
                 userId,
-                report.nodesProcessed(),
-                report.fragmentMappingsCreated(),
-                report.edgesProcessed()
+                fragmentsSize
         );
     }
 
     private GraphFormationReport directEdgeFormation(
-            Long userId
+            Long userId, List<SemanticFragment> fragments, Map<String, String> directCounts
     ) throws JsonProcessingException {
-        List<SemanticFragment> fragments =
-                semanticFragmentRepo.findAllByUserId(userId);
 
         if (fragments == null || fragments.isEmpty()) {
             log.info(
@@ -192,9 +344,6 @@ public class GraphFormationServiceImpl implements GraphFormationService {
 
         String labelsKey =
                 nodeLabelsKey(userId);
-
-        String directCountsKey =
-                directEdgeCountsKey(userId);
 
         /*
          * Local cache for this graph-formation run:
@@ -310,8 +459,6 @@ public class GraphFormationServiceImpl implements GraphFormationService {
          *
          * phraseHashA|phraseHashB -> co-occurrence count
          */
-        Map<String, String> directCounts =
-                jedis.hgetAll(directCountsKey);
 
         int edgesProcessed = 0;
 
@@ -422,6 +569,221 @@ public class GraphFormationServiceImpl implements GraphFormationService {
         );
     }
 
+    private GraphFormationReport indirectEdgeFormation(
+            Long userId,
+            List<SemanticFragment> fragments,
+            Map<String, Set<String>> phrasesByKeyword,
+            Map<String, Set<String>> keywordsByPhrase,
+            Map<String, String> labelsByHash
+    ) throws JsonProcessingException {
+
+        /*
+         * Load the nodes once for this method call.
+         *
+         * Previously this query ran once for every candidate pair.
+         */
+        Map<String, SemanticNode> nodesByLabel =
+                semanticNodeRepo.findAllByUserId(userId)
+                        .stream()
+                        .collect(Collectors.toMap(
+                                SemanticNode::getLabel,
+                                Function.identity(),
+                                (first, duplicate) -> first
+                        ));
+
+        Set<String> sourcePhrases =
+                fragments.stream()
+                        .filter(Objects::nonNull)
+                        .map(SemanticFragment::getNounPhrases)
+                        .filter(Objects::nonNull)
+                        .flatMap(Collection::stream)
+                        .filter(Objects::nonNull)
+                        .map(this::normalizePhrase)
+                        .filter(phrase -> !phrase.isBlank())
+                        .filter(keywordsByPhrase::containsKey)
+                        .collect(Collectors.toSet());
+
+        Set<NodePair> processedPairs =
+                new HashSet<>();
+
+        int edgesProcessed = 0;
+
+        for (String sourcePhrase : sourcePhrases) {
+            String sourceHash =
+                    hashingService.hash(sourcePhrase);
+
+            String sourceLabel =
+                    labelsByHash.get(sourceHash);
+
+            /*
+             * Keep your intended behavior:
+             * only process phrases represented in the direct-node mapping.
+             */
+            if (sourceLabel == null
+                    || !sourceLabel.equals(sourcePhrase)) {
+                continue;
+            }
+
+            Set<String> sourceKeywords =
+                    keywordsByPhrase.getOrDefault(
+                            sourcePhrase,
+                            Collections.emptySet()
+                    );
+
+            if (sourceKeywords.isEmpty()) {
+                continue;
+            }
+
+            Set<String> candidatePhrases =
+                    new HashSet<>();
+
+            for (String keyword : sourceKeywords) {
+                candidatePhrases.addAll(
+                        phrasesByKeyword.getOrDefault(
+                                keyword,
+                                Collections.emptySet()
+                        )
+                );
+            }
+
+            candidatePhrases.remove(sourcePhrase);
+
+            for (String targetPhrase : candidatePhrases) {
+                if (targetPhrase == null
+                        || targetPhrase.isBlank()) {
+                    continue;
+                }
+
+                String normalizedTargetPhrase =
+                        normalizePhrase(targetPhrase);
+
+                if (normalizedTargetPhrase.isBlank()
+                        || normalizedTargetPhrase.equals(sourcePhrase)) {
+                    continue;
+                }
+
+                Set<String> targetKeywords =
+                        keywordsByPhrase.getOrDefault(
+                                normalizedTargetPhrase,
+                                Collections.emptySet()
+                        );
+
+                if (targetKeywords.isEmpty()) {
+                    continue;
+                }
+
+                NodePair pair =
+                        NodePair.canonical(
+                                sourcePhrase,
+                                normalizedTargetPhrase
+                        );
+
+                if (!processedPairs.add(pair)) {
+                    continue;
+                }
+
+                Set<String> sharedKeywords =
+                        new HashSet<>(sourceKeywords);
+
+                sharedKeywords.retainAll(
+                        targetKeywords
+                );
+
+                if (sharedKeywords.isEmpty()) {
+                    continue;
+                }
+
+                Set<String> unionKeywords =
+                        new HashSet<>(sourceKeywords);
+
+                unionKeywords.addAll(
+                        targetKeywords
+                );
+
+                float overlapScore =
+                        (float) sharedKeywords.size()
+                                / unionKeywords.size();
+
+                SemanticNode sourceNode =
+                        nodesByLabel.get(pair.first());
+
+                SemanticNode targetNode =
+                        nodesByLabel.get(pair.second());
+
+                if (sourceNode == null || targetNode == null) {
+                    log.warn(
+                            "Skipping indirect edge because node is missing: {} -> {}",
+                            pair.first(),
+                            pair.second()
+                    );
+                    continue;
+                }
+
+                upsertIndirectEdge(
+                        sourceNode,
+                        targetNode,
+                        sharedKeywords.size(),
+                        0.0f, // Calculate IDF dynamically during search.
+                        overlapScore
+                );
+
+                edgesProcessed++;
+            }
+        }
+
+        return new GraphFormationReport(
+                sourcePhrases.size(),
+                0,
+                edgesProcessed
+        );
+    }
+
+    private Map<String, Set<String>> deserializeStringSetMap(
+            Map<String, String> jsonMap
+    ) throws JsonProcessingException {
+
+        Map<String, Set<String>> result =
+                new HashMap<>();
+
+        for (Map.Entry<String, String> entry :
+                jsonMap.entrySet()) {
+
+            String json = entry.getValue();
+
+            if (json == null || json.isBlank()) {
+                continue;
+            }
+
+            List<String> values =
+                    objectMapper.readValue(
+                            json,
+                            new TypeReference<List<String>>() {
+                            }
+                    );
+
+            result.put(
+                    entry.getKey(),
+                    new HashSet<>(values)
+            );
+        }
+
+        return result;
+    }
+
+    private record NodePair(
+            String first,
+            String second
+    ) {
+        private static NodePair canonical(
+                String first,
+                String second
+        ) {
+            return first.compareTo(second) < 0
+                    ? new NodePair(first, second)
+                    : new NodePair(second, first);
+        }
+    }
+
     private SemanticNode resolveNode(
             Long userId,
             String phraseHash,
@@ -520,6 +882,75 @@ public class GraphFormationServiceImpl implements GraphFormationService {
         }
     }
 
+    private void upsertIndirectEdge(
+            SemanticNode sourceNode,
+            SemanticNode targetNode,
+            int sharedKeywordCount,
+            float sharedKeywordIdf,
+            float overlapScore
+    ) {
+        SemanticNode canonicalSource;
+        SemanticNode canonicalTarget;
+
+        if (sourceNode.getId().compareTo(targetNode.getId()) < 0) {
+            canonicalSource = sourceNode;
+            canonicalTarget = targetNode;
+        } else {
+            canonicalSource = targetNode;
+            canonicalTarget = sourceNode;
+        }
+
+        Optional<SemanticEdge> existingEdge =
+                semanticEdgeRepo
+                        .findBySourceNode_IdAndTargetNode_Id(
+                                canonicalSource.getId(),
+                                canonicalTarget.getId()
+                        );
+
+        if (existingEdge.isPresent()) {
+            SemanticEdge edge = existingEdge.get();
+
+            /*
+             * These values were calculated from the complete keyword sets,
+             * so assign rather than increment. This makes the operation
+             * idempotent across repeated graph projections.
+             */
+            edge.setSharedKeywordCount(
+                    sharedKeywordCount
+            );
+
+            edge.setSharedKeywordIdf(
+                    sharedKeywordIdf
+            );
+
+            edge.setOverlapScore(
+                    overlapScore
+            );
+
+            edge.setFusedWeight(null);
+            edge.setWeightsEpoch(null);
+
+            semanticEdgeRepo.save(edge);
+            return;
+        }
+
+        SemanticEdge edge =
+                SemanticEdge.builder()
+                        .sourceNode(canonicalSource)
+                        .targetNode(canonicalTarget)
+                        .cooccurrenceCount(0L)
+                        .sharedKeywordCount(sharedKeywordCount)
+                        .sharedKeywordIdf(sharedKeywordIdf)
+                        .learnedConfirmations(0)
+                        .npmi(null)
+                        .overlapScore(overlapScore)
+                        .fusedWeight(null)
+                        .weightsEpoch(null)
+                        .build();
+
+        semanticEdgeRepo.save(edge);
+    }
+
     private void upsertDirectEdge(
             SemanticNode sourceNode,
             SemanticNode targetNode,
@@ -579,7 +1010,7 @@ public class GraphFormationServiceImpl implements GraphFormationService {
 
         List<float[]> wordCentroids = new ArrayList<>();
 
-        String redisKeyForGettingKeywords = "phrases:user:" + userId;
+        String redisKeyForGettingKeywords = "phrasesToKeywords:user:" + userId;
 
         String keyWordJson = jedis.hget(redisKeyForGettingKeywords, phrase);
 
@@ -635,6 +1066,21 @@ public class GraphFormationServiceImpl implements GraphFormationService {
                 : second + "|" + first;
     }
 
+    private String normalizePhrase(String phrase) {
+        if (phrase == null || phrase.isBlank()) return "";
+
+        return Arrays.stream(phrase.trim().split("\\s+"))
+                .map(this::normalizeWords)
+                .filter(w -> !w.isEmpty())
+                .collect(Collectors.joining(" "));
+    }
+
+    private String normalizeWords(String word) {
+        if (word == null) return "";
+        return word.toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]", ""); // strip underscores, punctuation, etc.
+    }
+
     private String fragmentNodesKey(
             Long userId,
             Long fragmentId
@@ -655,6 +1101,18 @@ public class GraphFormationServiceImpl implements GraphFormationService {
             Long userId
     ) {
         return DIRECT_EDGE_COUNTS_KEY + userId;
+    }
+
+    private String phrasesToKeywordsKey(
+            Long userId
+    ) {
+        return PHRASES_TO_KEYWORDS_KEY + userId;
+    }
+
+    private String wordToPhrasesKey(
+            Long userId
+    ) {
+        return WORD_TO_PHRASE + userId;
     }
 
     private record GraphFormationReport(

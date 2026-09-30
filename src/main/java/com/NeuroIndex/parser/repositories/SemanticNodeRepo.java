@@ -7,6 +7,9 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
+import java.util.List;
+
 @Repository
 public interface SemanticNodeRepo extends JpaRepository<SemanticNode, Long> {
 
@@ -20,4 +23,6 @@ public interface SemanticNodeRepo extends JpaRepository<SemanticNode, Long> {
             @Param("userId") Long userId,
             @Param("phrase") String phrase
     );
+
+    List<SemanticNode> findAllByUserId(Long userId);
 }

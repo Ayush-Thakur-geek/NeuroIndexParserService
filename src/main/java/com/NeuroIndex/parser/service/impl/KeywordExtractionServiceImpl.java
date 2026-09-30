@@ -20,8 +20,6 @@ import org.apache.lucene.util.BytesRef;
 import org.springframework.stereotype.Service;
 import redis.clients.jedis.UnifiedJedis;
 
-import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -399,7 +397,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
      * Filters noun phrases by overlap with BM25-selected keywords, then
      * persists the surviving phrase → matched-keywords mapping to Redis.
      *
-     * Redis structure: HSET phrases:user:{userId}
+     * Redis structure: HSET phrasesToKeywords:user:{userId}
      *   field = normalized phrase string
      *   value = JSON array of matched keyword strings
      *   e.g. "websocket endpoints" → ["websocket", "endpoint"]
@@ -420,7 +418,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         log.info("nounPhrases: {}", nounPhrases);
 
         List<String> validPhrases = new ArrayList<>();
-        String redisKey = "phrases:user:" + userId;
+        String redisKey = "phrasesToKeywords:user:" + userId;
 
         for (String phrase : nounPhrases) {
             if (phrase == null || phrase.isBlank()) continue;
@@ -885,7 +883,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
 
         List<float[]> wordCentroids = new ArrayList<>();
 
-        String redisKeyForGettingKeywords = "phrases:user:" + userId;
+        String redisKeyForGettingKeywords = "phrasesToKeywords:user:" + userId;
 
         String keyWordJson = jedis.hget(redisKeyForGettingKeywords, phrase);
 
