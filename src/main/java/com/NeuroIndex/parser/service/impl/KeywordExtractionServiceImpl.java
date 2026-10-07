@@ -410,7 +410,7 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
             long userId,
             List<String> nounPhrases,
             Set<String> selectedKeywords
-    ) {
+    ) throws JsonProcessingException {
         if (nounPhrases.isEmpty() || selectedKeywords.isEmpty()) {
             return Collections.emptyList();
         }
@@ -477,17 +477,59 @@ public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
         return validPhrases;
     }
 
-    private void mappingKeywordsToPhrase(long userId, List<String> keywords, String phrase) {
+    private synchronized void mappingKeywordsToPhrase(
+            long userId,
+            List<String> keywords,
+            String phrase
+    ) throws JsonProcessingException {
+
+        if (keywords == null
+                || keywords.isEmpty()
+                || phrase == null
+                || phrase.isBlank()) {
+            return;
+        }
+
+        String normalizedPhrase = normalizePhrase(phrase);
+
+        if (normalizedPhrase == null || normalizedPhrase.isBlank()) {
+            return;
+        }
+
         String redisKey = "wordsToPhrases:user:" + userId;
-        for  (String keyword : keywords) {
-            String normalizedKey = normalizeWords(keyword);
-            if (normalizedKey.isEmpty()) continue;
-            try {
-                String savedPhrase = objectMapper.writeValueAsString(phrase);
-                jedis.hset(redisKey, normalizedKey, objectMapper.writeValueAsString(savedPhrase));
-            } catch (JsonProcessingException e) {
-                throw new RuntimeException(e);
+
+        for (String keyword : keywords) {
+            String normalizedKeyword = normalizeWords(keyword);
+
+            if (normalizedKeyword == null || normalizedKeyword.isBlank()) {
+                continue;
             }
+
+            Set<String> mergedPhrases = new LinkedHashSet<>();
+
+            String existing = jedis.hget(
+                    redisKey,
+                    normalizedKeyword
+            );
+
+            if (existing != null && !existing.isBlank()) {
+                List<String> previousPhrases =
+                        objectMapper.readValue(
+                                existing,
+                                new TypeReference<List<String>>() {}
+                        );
+
+                mergedPhrases.addAll(previousPhrases);
+            }
+
+            mergedPhrases.add(normalizedPhrase);
+
+            // Serialize the collection exactly once.
+            jedis.hset(
+                    redisKey,
+                    normalizedKeyword,
+                    objectMapper.writeValueAsString(mergedPhrases)
+            );
         }
     }
 
