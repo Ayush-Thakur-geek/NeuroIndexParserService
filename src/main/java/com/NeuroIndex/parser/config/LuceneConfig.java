@@ -1,8 +1,10 @@
 package com.NeuroIndex.parser.config;
 
+import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.search.SearcherManager;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 import org.springframework.context.annotation.Bean;
@@ -29,5 +31,16 @@ public class LuceneConfig {
     @Bean
     public IndexWriter getIndexWriter() throws IOException {
         return new IndexWriter(getDirectory(), getIndexWriterConfig());
+    }
+
+    @Bean
+    public SearcherManager searcherManager() throws IOException {
+        IndexWriter indexWriter = getIndexWriter();
+        return new SearcherManager(indexWriter, null);
+    }
+
+    @Bean
+    public Analyzer analyzer() {
+        return new StandardAnalyzer();
     }
 }
