@@ -47,6 +47,7 @@ public class SearchServiceImpl implements SearchService {
     private static final int DEPTH = 3;
     private static final long GRAPH_TIMEOUT_SECONDS = 5;
     private static final int MAX_GRAPH_NODES = 1_000;
+    private static final int MAX_DIRECT_NEIGHBORS = 3;
     private final PlatformTransactionManager transactionManager;
 
     @Override
@@ -137,8 +138,9 @@ public class SearchServiceImpl implements SearchService {
         Future<List<GraphHit>> graphFuture = null;
 
         try {
+            long totalFragments = semanticFragmentRepo.count();
             graphFuture = executor.submit(
-                    () -> graphTraversal(userId, seedSnapshot)
+                    () -> graphTraversal(userId, seedSnapshot, totalFragments)
             );
 
             graphResults = graphFuture.get(
@@ -202,6 +204,7 @@ public class SearchServiceImpl implements SearchService {
         }
 
         for (GraphHit hit : graphResults) {
+            log.info("Graph search frag: {}", hit.fragmentId);
             resultFragmentIds.add(hit.fragmentId());
         }
 
@@ -254,7 +257,8 @@ public class SearchServiceImpl implements SearchService {
 
     private List<GraphHit> graphTraversal(
             Long userId,
-            List<LexicalHit> graphSeeds
+            List<LexicalHit> graphSeeds,
+            long totalFragments
     ) {
         /*
          * The worker thread needs its own transaction.
@@ -305,7 +309,7 @@ public class SearchServiceImpl implements SearchService {
                 return List.of();
             }
 
-            return traverse(userId, roots.values());
+            return traverse(userId, roots.values(), totalFragments);
         });
 
         return hits == null ? List.of() : hits;
@@ -313,7 +317,8 @@ public class SearchServiceImpl implements SearchService {
 
     private List<GraphHit> traverse(
             Long userId,
-            Collection<SemanticNode> roots
+            Collection<SemanticNode> roots,
+            long totalFragments
     ) {
         Queue<SemanticNode> queue = new ArrayDeque<>();
         Set<Long> visited = new LinkedHashSet<>();
@@ -357,7 +362,7 @@ public class SearchServiceImpl implements SearchService {
 
                 // Your existing method; scoring implementation remains unchanged.
                 List<SemanticEdge> edges = Objects.requireNonNull(
-                        getEdges(node),
+                        getEdges(node, totalFragments),
                         "getEdges() must return a list"
                 );
 
@@ -459,25 +464,108 @@ public class SearchServiceImpl implements SearchService {
         }
     }
 
-    private List<SemanticEdge> getEdges(SemanticNode node) {
-        Long id = node.getId();
-        List<SemanticEdge> edges = semanticEdgeRepo.findAllConnectedToNode(id);
-        for (SemanticEdge edge : edges) {
-            Double npmi = npmiCalculation(edge);
+    private List<SemanticEdge> getEdges(
+            SemanticNode node,
+            long totalFragments
+    ) {
+        List<SemanticEdge> connectedEdges =
+                semanticEdgeRepo.findAllConnectedToNode(node.getId());
+
+        List<ScoredEdge> scoredEdges = new ArrayList<>();
+
+        for (SemanticEdge edge : connectedEdges) {
+            if (edge.getCooccurrenceCount() <= 0) {
+                continue;
+            }
+
+            Double npmi = npmiCalculation(edge, totalFragments);
+
+            if (npmi == null || npmi <= 0.0) {
+                continue;
+            }
+
+            scoredEdges.add(new ScoredEdge(edge, npmi));
         }
+
+        return scoredEdges.stream()
+                .sorted(
+                        Comparator.comparingDouble(ScoredEdge::npmi)
+                                .reversed()
+                                .thenComparing(scored -> scored.edge().getId())
+                )
+                .limit(MAX_DIRECT_NEIGHBORS)
+                .map(ScoredEdge::edge)
+                .toList();
     }
 
-    private Double npmiCalculation(SemanticEdge edge) {
-        long cooccurrenceCount = edge.getCooccurrenceCount();
-        int sharedKeywordCount = edge.getSharedKeywordCount();
-        float sharedKeywordIdf = edge.getSharedKeywordIdf();
-        int learnedConfirmations = edge.getLearnedConfirmations();
+    private Double npmiCalculation(
+            SemanticEdge edge,
+            long totalFragments
+    ) {
+        if (totalFragments <= 0) {
+            return null; // No population to calculate probabilities from.
+        }
 
-        log.info("" +
-                "cooccurrence count: {} \n shared keyword count: {}" +
-                "\n learned confirmations: {} \n shared keyword idf: {}",
-                cooccurrenceCount, sharedKeywordCount, sharedKeywordIdf, learnedConfirmations);
+        Integer sourceCount =
+                edge.getSourceNode().getFragmentCount();
 
+        Integer targetCount =
+                edge.getTargetNode().getFragmentCount();
+
+        if (sourceCount == null || targetCount == null) {
+            throw new IllegalStateException(
+                    "Missing node fragment count for edgeId=" + edge.getId()
+            );
+        }
+
+        long countA = sourceCount;
+        long countB = targetCount;
+        long countAB = edge.getCooccurrenceCount();
+
+        /*
+         * Validate that all counts describe the same fragment population.
+         * Do not hide inflated Redis counts by clamping them.
+         */
+        if (countA <= 0
+                || countB <= 0
+                || countA > totalFragments
+                || countB > totalFragments
+                || countAB < 0
+                || countAB > Math.min(countA, countB)
+                || countAB < Math.max(
+                0L,
+                countA + countB - totalFragments
+        )) {
+            throw new IllegalStateException(
+                    "Invalid NPMI counts for edgeId=" + edge.getId()
+                            + ": N=" + totalFragments
+                            + ", countA=" + countA
+                            + ", countB=" + countB
+                            + ", countAB=" + countAB
+            );
+        }
+
+        if (countAB == 0) {
+            // No observed direct association; score indirect evidence separately.
+            return null;
+        }
+
+        if (countAB == totalFragments) {
+            // P(A,B)=1 makes the normalization denominator zero.
+            return null;
+        }
+
+        double pA = (double) countA / totalFragments;
+        double pB = (double) countB / totalFragments;
+        double pAB = (double) countAB / totalFragments;
+
+        double pmi =
+                Math.log(pAB) - Math.log(pA) - Math.log(pB);
+
+        double npmi = pmi / -Math.log(pAB);
+
+        // Only compensate for small floating-point rounding errors.
+        return Math.max(-1.0, Math.min(1.0, npmi));
     }
 
     public List<LexicalHit> searchLucene(
@@ -731,6 +819,11 @@ public class SearchServiceImpl implements SearchService {
             return Float.compare(this.score, other.score);
         }
     }
+
+    private record ScoredEdge(
+            SemanticEdge edge,
+            double npmi
+    ) {}
 
     public record GraphHit(Long fragmentId, Long fragNodeId) {
     }
