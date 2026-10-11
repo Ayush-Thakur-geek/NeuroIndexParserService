@@ -7,6 +7,9 @@ import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.springframework.stereotype.Component;
 
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.concurrent.TimeUnit;
 
 // Import your project's TimeMonitor annotation.
@@ -34,6 +37,15 @@ public class TimeMonitorAspect {
                     TimeUnit.NANOSECONDS.toMillis(
                             System.nanoTime() - started
                     );
+
+            String logText = joinPoint.getSignature().toShortString() + " took " + elapsedMillis + " ms \n";
+
+            Files.writeString(
+                    Paths.get("Time_Monitoring.txt"),
+                    logText + System.lineSeparator(),
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.APPEND
+            );
 
             log.info(
                     "{} took {} ms",

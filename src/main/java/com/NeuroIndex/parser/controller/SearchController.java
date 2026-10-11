@@ -2,6 +2,7 @@ package com.NeuroIndex.parser.controller;
 
 import com.NeuroIndex.parser.annotations.TimeMonitor;
 import com.NeuroIndex.parser.dtos.SearchResponseDTO;
+import com.NeuroIndex.parser.helperClasses.SearchJobStore;
 import com.NeuroIndex.parser.service.SearchService;
 import com.NeuroIndex.parser.service.SemanticSearchService;
 import com.NeuroIndex.parser.service.impl.SearchServiceImpl;
@@ -13,6 +14,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
 @RestController
@@ -23,41 +25,28 @@ public class SearchController {
     private final SearchService searchService;
     private final SemanticSearchService semanticSearchService;
 
-    // GET /beta/v1/search/fast/1?query=redis%20connection
     @TimeMonitor
     @GetMapping("/fast/{userId}")
-    public ResponseEntity<List<SearchServiceImpl.MessageSearchResponse>> fastSearch(
+    public ResponseEntity<SearchJobStore.SearchTicket> fastSearch(
             @PathVariable("userId") Long userId,
             @RequestParam("query") String query
-    ) throws ExecutionException, InterruptedException {
+    ) throws ExecutionException {
 
-        if (userId <= 0) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "User ID must be positive"
-            );
-        }
+        return ResponseEntity.ok(
+                searchService.fastSearch(query, userId)
+        );
+    }
 
-        if (query.isBlank()) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Search query must not be blank"
-            );
-        }
+    @TimeMonitor
+    @GetMapping("/refinement/{userId}/{searchId}")
+    public ResponseEntity<SearchJobStore.SearchTicket> refinement(
+            @PathVariable("userId") Long userId,
+            @PathVariable("searchId") UUID searchId
+    ) {
 
-        SearchResponseDTO result =
-                searchService.fastSearch(
-                        query.trim(),
-                        userId
-                );
-
-        List<SearchServiceImpl.GraphHit> graphHits = result.getGraphHits();
-        List<SearchServiceImpl.LexicalHit> lexicalHits = result.getLexicalHits();
-
-        List<SearchServiceImpl.MessageSearchResponse> searchResults = searchService.extractMessage(userId, lexicalHits, graphHits);
-
-
-        return ResponseEntity.ok(searchResults);
+        return ResponseEntity.ok(
+                searchService.getRefinement(userId, searchId)
+        );
     }
 
     @TimeMonitor

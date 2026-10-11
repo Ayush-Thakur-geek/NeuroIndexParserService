@@ -3,11 +3,9 @@ package com.NeuroIndex.parser.repositories;
 import com.NeuroIndex.entity.domainObjects.SemanticUnit;
 import com.NeuroIndex.entity.models.Message;
 import com.NeuroIndex.entity.models.SemanticFragment;
+import jakarta.persistence.QueryHint;
 import jakarta.transaction.Transactional;
-import org.springframework.data.jpa.repository.EntityGraph;
-import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Modifying;
-import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.*;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
@@ -117,4 +115,75 @@ public interface SemanticFragmentRepo extends JpaRepository<SemanticFragment, Lo
             @Param("queryEmbedding") String queryEmbedding,
             @Param("limit") int limit
     );
+
+    @QueryHints(
+            @QueryHint(
+                    name = "jakarta.persistence.query.timeout",
+                    value = "5000"
+            )
+    )
+    long countByUserId(Long userId);
+
+
+    interface FragmentMessageLink {
+
+        Long getFragmentId();
+
+        Long getMessageId();
+    }
+
+
+    @QueryHints(
+            @QueryHint(
+                    name = "jakarta.persistence.query.timeout",
+                    value = "5000"
+            )
+    )
+    @Query("""
+        SELECT
+            fragment.id AS fragmentId,
+            fragment.message.id AS messageId
+        FROM SemanticFragment fragment
+        WHERE fragment.userId = :userId
+          AND fragment.id IN :fragmentIds
+        """)
+    List<FragmentMessageLink> findSearchMessageLinks(
+            @Param("userId") Long userId,
+            @Param("fragmentIds") Collection<Long> fragmentIds
+    );
+
+
+    interface SearchMessageContent {
+
+        Long getMessageId();
+
+        List<SemanticUnit> getMessageContent();
+    }
+
+
+    @QueryHints(
+            @QueryHint(
+                    name = "jakarta.persistence.query.timeout",
+                    value = "5000"
+            )
+    )
+    @Query("""
+        SELECT
+            message.id AS messageId,
+            message.content AS messageContent
+        FROM Message message
+        WHERE message.id IN :messageIds
+          AND EXISTS (
+              SELECT fragment.id
+              FROM SemanticFragment fragment
+              WHERE fragment.message.id = message.id
+                AND fragment.userId = :userId
+          )
+        """)
+    List<SearchMessageContent> findSearchMessageContents(
+            @Param("userId") Long userId,
+            @Param("messageIds") Collection<Long> messageIds
+    );
+
+
 }

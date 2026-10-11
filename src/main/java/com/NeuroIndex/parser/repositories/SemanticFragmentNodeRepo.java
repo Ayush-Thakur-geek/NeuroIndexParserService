@@ -2,8 +2,10 @@ package com.NeuroIndex.parser.repositories;
 
 import com.NeuroIndex.entity.models.SemanticFragmentNode;
 import com.NeuroIndex.entity.models.SemanticNode;
+import jakarta.persistence.QueryHint;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
@@ -29,12 +31,51 @@ public interface SemanticFragmentNodeRepo extends JpaRepository<SemanticFragment
             @Param("fragmentIds") Collection<Long> fragmentIds
     );
 
-    interface GraphPosting {
+    interface SearchSeedNode {
+
         Long getFragmentId();
-        Long getMappingId();
+
         Long getNodeId();
     }
 
+
+    @QueryHints(
+            @QueryHint(
+                    name = "jakarta.persistence.query.timeout",
+                    value = "5000"
+            )
+    )
+    @Query("""
+        SELECT
+            mapping.fragment.id AS fragmentId,
+            mapping.node.id AS nodeId
+        FROM SemanticFragmentNode mapping
+        WHERE mapping.fragment.userId = :userId
+          AND mapping.node.userId = :userId
+          AND mapping.fragment.id IN :fragmentIds
+        """)
+    List<SearchSeedNode> findSearchSeedNodes(
+            @Param("userId") Long userId,
+            @Param("fragmentIds") Collection<Long> fragmentIds
+    );
+
+
+    interface GraphPosting {
+
+        Long getFragmentId();
+
+        Long getMappingId();
+
+        Long getNodeId();
+    }
+
+
+    @QueryHints(
+            @QueryHint(
+                    name = "jakarta.persistence.query.timeout",
+                    value = "5000"
+            )
+    )
     @Query("""
         SELECT
             mapping.fragment.id AS fragmentId,
@@ -49,4 +90,5 @@ public interface SemanticFragmentNodeRepo extends JpaRepository<SemanticFragment
             @Param("userId") Long userId,
             @Param("nodeIds") Collection<Long> nodeIds
     );
+
 }

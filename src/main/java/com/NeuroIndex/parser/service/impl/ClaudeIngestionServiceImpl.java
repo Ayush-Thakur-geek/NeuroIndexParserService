@@ -45,7 +45,6 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     private final ConversationRepo conversationRepo;
     private final MessageRepo messageRepo;
     private final AffiliatedEmailsRepo affiliatedEmailRepo;
-    private final ExecutorService executorService;
     private final ObjectMapper objectMapper;
     private final SemanticFragmentationService semanticFragmentationService;
     private final ApplicationEventPublisher eventPublisher;
@@ -60,7 +59,6 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     ClaudeIngestionServiceImpl(ConversationRepo conversationRepo,
                                MessageRepo messageRepo,
                                AffiliatedEmailsRepo affiliatedEmailRepo,
-                               ExecutorService executorService,
                                ObjectMapper objectMapper,
                                SemanticFragmentationService semanticFragmentationService,
                                KeyWordExtractionService keywordExtractionService,
@@ -70,7 +68,6 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         this.conversationRepo = conversationRepo;
         this.messageRepo = messageRepo;
         this.affiliatedEmailRepo = affiliatedEmailRepo;
-        this.executorService = executorService;
         this.objectMapper = objectMapper;
         this.semanticFragmentationService = semanticFragmentationService;
         this.keywordExtractionService = keywordExtractionService;
