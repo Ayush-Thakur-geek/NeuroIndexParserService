@@ -32,17 +32,18 @@ public interface SemanticFragmentNodeRepo extends JpaRepository<SemanticFragment
     interface GraphPosting {
         Long getFragmentId();
         Long getMappingId();
+        Long getNodeId();
     }
 
     @Query("""
         SELECT
             mapping.fragment.id AS fragmentId,
-            mapping.id AS mappingId
+            mapping.id AS mappingId,
+            mapping.node.id AS nodeId
         FROM SemanticFragmentNode mapping
         WHERE mapping.node.userId = :userId
           AND mapping.fragment.userId = :userId
           AND mapping.node.id IN :nodeIds
-        ORDER BY mapping.fragment.id, mapping.id
         """)
     List<GraphPosting> findGraphPostings(
             @Param("userId") Long userId,

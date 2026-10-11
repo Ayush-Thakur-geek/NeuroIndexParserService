@@ -1,6 +1,9 @@
 package com.NeuroIndex.parser.dtos;
 
+import com.NeuroIndex.parser.service.impl.SearchServiceImpl;
 import lombok.*;
+
+import java.util.List;
 
 @Getter
 @Setter
@@ -9,5 +12,6 @@ import lombok.*;
 @AllArgsConstructor
 public class SearchResponseDTO {
     private Long userId;
-    private Long fragmentId;
+    private List<SearchServiceImpl.GraphHit> graphHits;
+    private List<SearchServiceImpl.LexicalHit> lexicalHits;
 }

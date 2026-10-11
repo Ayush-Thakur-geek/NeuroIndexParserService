@@ -1,7 +1,11 @@
 package com.NeuroIndex.parser.controller;
 
+import com.NeuroIndex.parser.annotations.TimeMonitor;
 import com.NeuroIndex.parser.dtos.SearchResponseDTO;
 import com.NeuroIndex.parser.service.SearchService;
+import com.NeuroIndex.parser.service.SemanticSearchService;
+import com.NeuroIndex.parser.service.impl.SearchServiceImpl;
+import com.NeuroIndex.parser.service.impl.SemanticSearchServiceImpl;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -17,10 +21,12 @@ import java.util.concurrent.ExecutionException;
 public class SearchController {
 
     private final SearchService searchService;
+    private final SemanticSearchService semanticSearchService;
 
     // GET /beta/v1/search/fast/1?query=redis%20connection
+    @TimeMonitor
     @GetMapping("/fast/{userId}")
-    public ResponseEntity<List<Long>> fastSearch(
+    public ResponseEntity<List<SearchServiceImpl.MessageSearchResponse>> fastSearch(
             @PathVariable("userId") Long userId,
             @RequestParam("query") String query
     ) throws ExecutionException, InterruptedException {
@@ -39,15 +45,34 @@ public class SearchController {
             );
         }
 
-        List<SearchResponseDTO> results =
+        SearchResponseDTO result =
                 searchService.fastSearch(
                         query.trim(),
                         userId
                 );
 
-        List<Long> fragIds = results.stream()
-                .map(SearchResponseDTO::getFragmentId).toList();
+        List<SearchServiceImpl.GraphHit> graphHits = result.getGraphHits();
+        List<SearchServiceImpl.LexicalHit> lexicalHits = result.getLexicalHits();
 
-        return ResponseEntity.ok(fragIds);
+        List<SearchServiceImpl.MessageSearchResponse> searchResults = searchService.extractMessage(userId, lexicalHits, graphHits);
+
+
+        return ResponseEntity.ok(searchResults);
+    }
+
+    @TimeMonitor
+    @GetMapping("/semantic/{userId}")
+    public ResponseEntity<List<SemanticSearchServiceImpl.SemanticMessageResult>> semanticSearch(
+            @PathVariable("userId") Long userId,
+            @RequestParam("query") String query,
+            @RequestParam(value = "limit", defaultValue = "20") int limit
+    ) {
+        return ResponseEntity.ok(
+                semanticSearchService.search(
+                        userId,
+                        query,
+                        limit
+                )
+        );
     }
 }

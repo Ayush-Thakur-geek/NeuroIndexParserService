@@ -1,5 +1,7 @@
 package com.NeuroIndex.parser.repositories;
 
+import com.NeuroIndex.entity.domainObjects.SemanticUnit;
+import com.NeuroIndex.entity.models.Message;
 import com.NeuroIndex.entity.models.SemanticFragment;
 import jakarta.transaction.Transactional;
 import org.springframework.data.jpa.repository.EntityGraph;
@@ -9,6 +11,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -56,5 +59,62 @@ public interface SemanticFragmentRepo extends JpaRepository<SemanticFragment, Lo
     Optional<SemanticFragment> findByIdAndUserId(
             Long fragmentId,
             Long userId
+    );
+
+    interface FragmentMessageContent {
+        Long getFragmentId();
+        Long getMessageId();
+        List<SemanticUnit> getMessageContent();
+    }
+
+    @Query("""
+        SELECT
+            fragment.id AS fragmentId,
+            message.id AS messageId,
+            message.content AS messageContent
+        FROM SemanticFragment fragment
+        JOIN fragment.message message
+        WHERE fragment.userId = :userId
+          AND fragment.id IN :fragmentIds
+        """)
+    List<FragmentMessageContent> findMessageContent(
+            @Param("userId") Long userId,
+            @Param("fragmentIds") Collection<Long> fragmentIds
+    );
+
+    @Query(
+            value = """
+                WITH fragment_distances AS MATERIALIZED (
+                    SELECT
+                        fragment.message_id,
+                        fragment.embedding
+                            <=> CAST(:queryEmbedding AS vector)
+                            AS cosine_distance
+                    FROM semantic_fragments fragment
+                    WHERE fragment.user_id = :userId
+                      AND fragment.embedding IS NOT NULL
+                ),
+                ranked_messages AS (
+                    SELECT
+                        message_id,
+                        MIN(cosine_distance) AS best_distance
+                    FROM fragment_distances
+                    GROUP BY message_id
+                )
+                SELECT message.*
+                FROM message
+                JOIN ranked_messages ranked
+                    ON ranked.message_id = message.id
+                ORDER BY
+                    ranked.best_distance ASC,
+                    message.id ASC
+                LIMIT :limit
+                """,
+            nativeQuery = true
+    )
+    List<Message> findBySemanticSearch(
+            @Param("userId") Long userId,
+            @Param("queryEmbedding") String queryEmbedding,
+            @Param("limit") int limit
     );
 }

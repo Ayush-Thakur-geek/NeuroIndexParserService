@@ -1,11 +1,9 @@
 package com.NeuroIndex.parser.service.impl;
 
+import com.NeuroIndex.entity.domainObjects.SemanticUnit;
 import com.NeuroIndex.entity.models.*;
 import com.NeuroIndex.parser.dtos.SearchResponseDTO;
-import com.NeuroIndex.parser.repositories.SemanticEdgeRepo;
-import com.NeuroIndex.parser.repositories.SemanticFragmentNodeRepo;
-import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
-import com.NeuroIndex.parser.repositories.SemanticNodeRepo;
+import com.NeuroIndex.parser.repositories.*;
 import com.NeuroIndex.parser.service.SearchService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
@@ -18,12 +16,10 @@ import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.StoredFields;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.*;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
 import java.util.*;
@@ -49,9 +45,10 @@ public class SearchServiceImpl implements SearchService {
     private static final int MAX_GRAPH_NODES = 1_000;
     private static final int MAX_DIRECT_NEIGHBORS = 3;
     private final PlatformTransactionManager transactionManager;
+    private static final int RRF_K = 60;
 
     @Override
-    public List<SearchResponseDTO> fastSearch(
+    public SearchResponseDTO fastSearch(
             String query,
             Long userId
     ) throws ExecutionException, InterruptedException {
@@ -74,7 +71,7 @@ public class SearchServiceImpl implements SearchService {
 
         if (luceneResults.isEmpty()) {
             log.debug("No Lucene results for userId={}", userId);
-            return List.of();
+            return new SearchResponseDTO();
         }
 
         // Lucene results already arrive in descending score order.
@@ -197,61 +194,171 @@ public class SearchServiceImpl implements SearchService {
          *
          * This is deduplication only—not final RRF/score fusion.
          */
-        Set<Long> resultFragmentIds = new LinkedHashSet<>();
 
-        for (LexicalHit hit : rankedHits) {
-            resultFragmentIds.add(hit.fragmentId());
-        }
-
-        for (GraphHit hit : graphResults) {
-            log.info("Graph search frag: {}", hit.fragmentId);
-            resultFragmentIds.add(hit.fragmentId());
-        }
-
-        List<SearchResponseDTO> results =
-                resultFragmentIds.stream()
-                        .map(fragmentId -> SearchResponseDTO.builder()
-                                .userId(userId)
-                                .fragmentId(fragmentId)
-                                .build())
-                        .toList();
+        SearchResponseDTO searchResponseDTO = SearchResponseDTO.builder()
+                .userId(userId)
+                .graphHits(graphResults)
+                .lexicalHits(rankedHits)
+                .build();
+//        Set<Long> resultFragmentIds = new LinkedHashSet<>();
+//
+//        for (LexicalHit hit : rankedHits) {
+//            resultFragmentIds.add(hit.fragmentId());
+//        }
+//
+//        for (GraphHit hit : graphResults) {
+//            log.info("Graph search frag: {}", hit.fragmentId);
+//            resultFragmentIds.add(hit.fragmentId());
+//        }
+//
+//        List<SearchResponseDTO> results =
+//                resultFragmentIds.stream()
+//                        .map(fragmentId -> SearchResponseDTO.builder()
+//                                .userId(userId)
+//                                .fragmentId(fragmentId)
+//                                .build())
+//                        .toList();
 
         long elapsedMillis =
                 TimeUnit.NANOSECONDS.toMillis(
                         System.nanoTime() - started
                 );
 
-        log.info(
-                "Search completed: userId={}, lexicalHits={}, graphHits={}, "
-                        + "uniqueResults={}, elapsedMs={}",
-                userId,
-                rankedHits.size(),
-                graphResults.size(),
-                results.size(),
-                elapsedMillis
-        );
+//        log.info(
+//                "Search completed: userId={}, lexicalHits={}, graphHits={}, "
+//                        + "uniqueResults={}, elapsedMs={}",
+//                userId,
+//                rankedHits.size(),
+//                graphResults.size(),
+//                results.size(),
+//                elapsedMillis
+//        );
 
-        return results;
+        return searchResponseDTO;
     }
 
     @Override
     @Transactional(readOnly = true)
-    public Message extractMessage(
-            SearchResponseDTO searchResponseDTO,
-            Long userId
+    public List<MessageSearchResponse> extractMessage(
+            Long userId,
+            List<LexicalHit> rankedHits,
+            List<GraphHit> graphHits
     ) {
-        SemanticFragment fragment =
-                semanticFragmentRepo.findByIdAndUserId(
-                        searchResponseDTO.getFragmentId(),
-                        userId
-                ).orElseThrow(() ->
-                        new ResponseStatusException(
-                                HttpStatus.NOT_FOUND,
-                                "Search result not found"
-                        )
+        if (userId == null) {
+            throw new IllegalArgumentException("User ID is required");
+        }
+
+        Set<Long> fragmentIds = new HashSet<>();
+
+        for (LexicalHit hit : rankedHits) {
+            fragmentIds.add(hit.fragmentId());
+        }
+
+        for (GraphHit hit : graphHits) {
+            fragmentIds.add(hit.fragmentId());
+        }
+
+        if (fragmentIds.isEmpty()) {
+            return List.of();
+        }
+
+        /*
+         * One query supplies fragment → message mappings and message text.
+         * Missing or other users' fragments are excluded.
+         */
+        List<SemanticFragmentRepo.FragmentMessageContent> rows =
+                semanticFragmentRepo.findMessageContent(
+                        userId,
+                        fragmentIds
                 );
 
-        return fragment.getMessage();
+        Map<Long, Long> fragmentToMessage = new HashMap<>();
+        Map<Long, List<SemanticUnit>> messageContent =
+                new HashMap<>();
+
+        for (SemanticFragmentRepo.FragmentMessageContent row : rows) {
+            fragmentToMessage.put(
+                    row.getFragmentId(),
+                    row.getMessageId()
+            );
+
+            messageContent.putIfAbsent(
+                    row.getMessageId(),
+                    row.getMessageContent()
+            );
+        }
+
+        /*
+         * Inputs must already be ordered by descending relevance.
+         * distinct() preserves the first occurrence, corresponding to
+         * each message's strongest-ranked fragment.
+         */
+        List<Long> luceneMessageIds = rankedHits.stream()
+                .map(hit -> fragmentToMessage.get(hit.fragmentId()))
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+
+        List<Long> graphMessageIds = graphHits.stream()
+                .map(hit -> fragmentToMessage.get(hit.fragmentId()))
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+
+        List<RrfRank> rankedResults =
+                rrf(luceneMessageIds, graphMessageIds);
+
+        return rankedResults.stream()
+                .map(result -> new MessageSearchResponse(
+                        result.messageId(),
+                        result.score(),
+                        messageContent.getOrDefault(
+                                result.messageId(),
+                                List.of()
+                        )
+                ))
+                .toList();
+    }
+
+    private List<RrfRank> rrf(
+            List<Long> luceneMessageIds,
+            List<Long> graphMessageIds
+    ) {
+        Map<Long, Double> fusedScores = new HashMap<>();
+
+        addRrfContributions(luceneMessageIds, fusedScores);
+        addRrfContributions(graphMessageIds, fusedScores);
+
+        return fusedScores.entrySet()
+                .stream()
+                .map(entry -> new RrfRank(
+                        entry.getKey(),
+                        entry.getValue()
+                ))
+                .sorted(
+                        Comparator.comparingDouble(RrfRank::score)
+                                .reversed()
+                                .thenComparing(RrfRank::messageId)
+                )
+                .toList();
+    }
+
+    private void addRrfContributions(
+            List<Long> rankedMessageIds,
+            Map<Long, Double> fusedScores
+    ) {
+        for (int index = 0; index < rankedMessageIds.size(); index++) {
+            int rank = index + 1;
+
+            double contribution =
+                    1.0 / (RRF_K + rank);
+
+            fusedScores.merge(
+                    rankedMessageIds.get(index),
+                    contribution,
+                    Double::sum
+            );
+        }
     }
 
 
@@ -260,11 +367,6 @@ public class SearchServiceImpl implements SearchService {
             List<LexicalHit> graphSeeds,
             long totalFragments
     ) {
-        /*
-         * The worker thread needs its own transaction.
-         * A private @Transactional method would not establish one through
-         * self-invocation.
-         */
         TransactionTemplate transaction =
                 new TransactionTemplate(transactionManager);
 
@@ -273,35 +375,58 @@ public class SearchServiceImpl implements SearchService {
         List<GraphHit> hits = transaction.execute(status -> {
             checkGraphInterrupted();
 
-            Set<Long> fragmentIds = graphSeeds.stream()
-                    .map(LexicalHit::fragmentId)
-                    .collect(Collectors.toSet());
+            Map<Long, Float> fragmentScores =
+                    graphSeeds.stream()
+                            .collect(Collectors.toMap(
+                                    LexicalHit::fragmentId,
+                                    LexicalHit::score,
+                                    (first, second) -> Math.max(first, second)
+                            ));
 
-            if (fragmentIds.isEmpty()) {
+            if (fragmentScores.isEmpty()) {
                 return List.of();
             }
 
             List<SemanticFragmentNode> mappings =
                     semanticFragmentNodeRepo.findSeedMappings(
                             userId,
-                            fragmentIds
+                            fragmentScores.keySet()
                     );
 
-            // The same node can belong to several seed fragments.
             Map<Long, SemanticNode> roots = new LinkedHashMap<>();
+            Map<Long, Double> seedNodeScores = new HashMap<>();
 
             for (SemanticFragmentNode mapping : mappings) {
                 SemanticNode node = mapping.getNode();
 
-                if (Objects.equals(node.getUserId(), userId)) {
-                    roots.putIfAbsent(node.getId(), node);
+                if (!Objects.equals(node.getUserId(), userId)) {
+                    continue;
                 }
+
+                Float fragmentScore = fragmentScores.get(
+                        mapping.getFragment().getId()
+                );
+
+                if (fragmentScore == null
+                        || !Float.isFinite(fragmentScore)
+                        || fragmentScore <= 0.0f) {
+                    continue;
+                }
+
+                roots.putIfAbsent(node.getId(), node);
+
+                // A node can be introduced by several seed fragments.
+                seedNodeScores.merge(
+                        node.getId(),
+                        fragmentScore.doubleValue(),
+                        Math::max
+                );
             }
 
             log.info(
-                    "Graph seeds resolved: userId={}, fragmentMappings={}, nodes={}",
+                    "Graph seeds resolved: userId={}, seedFragments={}, seedNodes={}",
                     userId,
-                    mappings.size(),
+                    fragmentScores.size(),
                     roots.size()
             );
 
@@ -309,7 +434,12 @@ public class SearchServiceImpl implements SearchService {
                 return List.of();
             }
 
-            return traverse(userId, roots.values(), totalFragments);
+            return traverse(
+                    userId,
+                    roots.values(),
+                    seedNodeScores,
+                    totalFragments
+            );
         });
 
         return hits == null ? List.of() : hits;
@@ -318,57 +448,76 @@ public class SearchServiceImpl implements SearchService {
     private List<GraphHit> traverse(
             Long userId,
             Collection<SemanticNode> roots,
+            Map<Long, Double> seedNodeScores,
             long totalFragments
     ) {
-        Queue<SemanticNode> queue = new ArrayDeque<>();
-        Set<Long> visited = new LinkedHashSet<>();
+        Map<Long, ScoredNode> frontier = new LinkedHashMap<>();
 
-        for (SemanticNode root : roots) {
-            if (visited.size() >= MAX_GRAPH_NODES) {
+        // Strongest score found for each node across all hop depths.
+        Map<Long, Double> bestNodeScores = new HashMap<>();
+
+        // Avoid fetching and scoring the same node's edges repeatedly.
+        Map<Long, List<ScoredEdge>> edgeCache = new HashMap<>();
+
+        boolean capped = false;
+
+        List<SemanticNode> orderedRoots = roots.stream()
+                .sorted(
+                        Comparator.comparingDouble(
+                                (SemanticNode node) ->
+                                        seedNodeScores.getOrDefault(
+                                                node.getId(),
+                                                0.0
+                                        )
+                        ).reversed()
+                )
+                .toList();
+
+        for (SemanticNode root : orderedRoots) {
+            if (bestNodeScores.size() >= MAX_GRAPH_NODES) {
+                capped = true;
                 break;
             }
 
-            if (visited.add(root.getId())) {
-                queue.add(root);
+            double score = seedNodeScores.getOrDefault(
+                    root.getId(),
+                    0.0
+            );
+
+            if (score <= 0.0) {
+                continue;
             }
+
+            frontier.put(
+                    root.getId(),
+                    new ScoredNode(root, score)
+            );
+
+            bestNodeScores.put(root.getId(), score);
         }
 
-        boolean capped = visited.size() >= MAX_GRAPH_NODES;
-
-        /*
-         * DEPTH means number of edge hops.
-         * Seed nodes are included even when DEPTH is zero.
-         */
         for (int hop = 0;
-             hop < DEPTH && !queue.isEmpty() && !capped;
+             hop < DEPTH && !frontier.isEmpty();
              hop++) {
 
             checkGraphInterrupted();
 
-            int levelSize = queue.size();
+            Map<Long, ScoredNode> nextFrontier = new LinkedHashMap<>();
 
-            log.debug(
-                    "Graph traversal: userId={}, hop={}, frontier={}, visited={}",
-                    userId,
-                    hop + 1,
-                    levelSize,
-                    visited.size()
-            );
-
-            for (int i = 0; i < levelSize && !capped; i++) {
+            for (ScoredNode current : frontier.values()) {
                 checkGraphInterrupted();
 
-                SemanticNode node = queue.remove();
+                SemanticNode node = current.node();
 
-                // Your existing method; scoring implementation remains unchanged.
-                List<SemanticEdge> edges = Objects.requireNonNull(
-                        getEdges(node, totalFragments),
-                        "getEdges() must return a list"
+                List<ScoredEdge> edges = edgeCache.computeIfAbsent(
+                        node.getId(),
+                        ignored -> getEdges(node, totalFragments)
                 );
 
-                for (SemanticEdge edge : edges) {
+                for (ScoredEdge scoredEdge : edges) {
                     checkGraphInterrupted();
 
+                    SemanticEdge edge = scoredEdge.edge();
                     SemanticNode neighbor;
 
                     if (Objects.equals(
@@ -394,24 +543,55 @@ public class SearchServiceImpl implements SearchService {
 
                     if (!Objects.equals(neighbor.getUserId(), userId)) {
                         log.warn(
-                                "Skipping cross-user graph neighbor: "
-                                        + "userId={}, nodeId={}",
+                                "Skipping cross-user neighbor: userId={}, nodeId={}",
                                 userId,
                                 neighbor.getId()
                         );
                         continue;
                     }
 
-                    if (visited.add(neighbor.getId())) {
-                        queue.add(neighbor);
+                    double nextScore =
+                            current.score() * scoredEdge.npmi();
+
+                    if (!Double.isFinite(nextScore) || nextScore <= 0.0) {
+                        continue;
                     }
 
-                    if (visited.size() >= MAX_GRAPH_NODES) {
+                    Long neighborId = neighbor.getId();
+
+                    if (!bestNodeScores.containsKey(neighborId)
+                            && bestNodeScores.size() >= MAX_GRAPH_NODES) {
                         capped = true;
-                        break;
+                        continue;
+                    }
+
+                    bestNodeScores.merge(
+                            neighborId,
+                            nextScore,
+                            Math::max
+                    );
+
+                    ScoredNode previous = nextFrontier.get(neighborId);
+
+                    if (previous == null || nextScore > previous.score()) {
+                        nextFrontier.put(
+                                neighborId,
+                                new ScoredNode(neighbor, nextScore)
+                        );
                     }
                 }
             }
+
+            log.debug(
+                    "Scored graph hop completed: userId={}, hop={}, "
+                            + "nextFrontier={}, reachedNodes={}",
+                    userId,
+                    hop + 1,
+                    nextFrontier.size(),
+                    bestNodeScores.size()
+            );
+
+            frontier = nextFrontier;
         }
 
         if (capped) {
@@ -422,38 +602,64 @@ public class SearchServiceImpl implements SearchService {
             );
         }
 
+        if (bestNodeScores.isEmpty()) {
+            return List.of();
+        }
+
         checkGraphInterrupted();
 
-        /*
-         * Get fragment IDs belonging to all reached nodes in one query.
-         * Do not repeatedly return the original seed fragment.
-         */
         List<SemanticFragmentNodeRepo.GraphPosting> postings =
                 semanticFragmentNodeRepo.findGraphPostings(
                         userId,
-                        visited
+                        bestNodeScores.keySet()
                 );
 
-        Map<Long, GraphHit> uniqueHits = new LinkedHashMap<>();
+        Map<Long, GraphHit> bestFragmentHits = new HashMap<>();
 
         for (SemanticFragmentNodeRepo.GraphPosting posting : postings) {
-            uniqueHits.putIfAbsent(
+            double score = bestNodeScores.getOrDefault(
+                    posting.getNodeId(),
+                    0.0
+            );
+
+            if (score <= 0.0) {
+                continue;
+            }
+
+            GraphHit candidate = new GraphHit(
                     posting.getFragmentId(),
-                    new GraphHit(
-                            posting.getFragmentId(),
-                            posting.getMappingId()
-                    )
+                    posting.getMappingId(),
+                    score
+            );
+
+            bestFragmentHits.merge(
+                    candidate.fragmentId(),
+                    candidate,
+                    (existing, incoming) ->
+                            incoming.score() > existing.score()
+                                    ? incoming
+                                    : existing
             );
         }
 
+        List<GraphHit> rankedHits = bestFragmentHits.values()
+                .stream()
+                .sorted(
+                        Comparator.comparingDouble(GraphHit::score)
+                                .reversed()
+                                .thenComparing(GraphHit::fragmentId)
+                )
+                .toList();
+
         log.info(
-                "Graph traversal completed: userId={}, visitedNodes={}, fragments={}",
+                "Scored graph traversal completed: userId={}, "
+                        + "reachedNodes={}, rankedFragments={}",
                 userId,
-                visited.size(),
-                uniqueHits.size()
+                bestNodeScores.size(),
+                rankedHits.size()
         );
 
-        return new ArrayList<>(uniqueHits.values());
+        return rankedHits;
     }
 
     private void checkGraphInterrupted() {
@@ -464,7 +670,7 @@ public class SearchServiceImpl implements SearchService {
         }
     }
 
-    private List<SemanticEdge> getEdges(
+    private List<ScoredEdge> getEdges(
             SemanticNode node,
             long totalFragments
     ) {
@@ -474,6 +680,8 @@ public class SearchServiceImpl implements SearchService {
         List<ScoredEdge> scoredEdges = new ArrayList<>();
 
         for (SemanticEdge edge : connectedEdges) {
+            checkGraphInterrupted();
+
             if (edge.getCooccurrenceCount() <= 0) {
                 continue;
             }
@@ -494,7 +702,6 @@ public class SearchServiceImpl implements SearchService {
                                 .thenComparing(scored -> scored.edge().getId())
                 )
                 .limit(MAX_DIRECT_NEIGHBORS)
-                .map(ScoredEdge::edge)
                 .toList();
     }
 
@@ -820,11 +1027,29 @@ public class SearchServiceImpl implements SearchService {
         }
     }
 
+    private record ScoredNode(
+            SemanticNode node,
+            double score
+    ) {}
+
     private record ScoredEdge(
             SemanticEdge edge,
             double npmi
     ) {}
 
-    public record GraphHit(Long fragmentId, Long fragNodeId) {
-    }
+    public record GraphHit(
+            Long fragmentId,
+            Long mappingId,
+            double score
+    ) {}
+
+    private record RrfRank(
+            Long messageId,
+            double score
+    ) {}
+    public record MessageSearchResponse(
+            Long messageId,
+            double score,
+            List<SemanticUnit> content
+    ) {}
 }
