@@ -1,0 +1,10 @@
+SearchController.semanticSearch(..) took 2060 ms 
+
+SearchController.fastSearch(..) took 646 ms 
+
+SearchController.semanticSearch(..) took 269 ms 
+
+SearchController.fastSearch(..) took 174 ms
+
+SearchController.refinement(..) took 0 ms 
+

@@ -2,28 +2,41 @@ package com.NeuroIndex.parser.service.impl;
 
 import com.NeuroIndex.entity.domainObjects.SemanticUnit;
 import com.NeuroIndex.entity.enums.SemanticContentType;
-import com.NeuroIndex.entity.models.AffiliatedEmail;
-import com.NeuroIndex.entity.models.Conversation;
-import com.NeuroIndex.entity.models.Message;
+import com.NeuroIndex.entity.models.*;
 import com.NeuroIndex.parser.dtos.ClaudeConversationJsonDTO;
-import com.NeuroIndex.parser.exception.CustomException;
+import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
+import com.NeuroIndex.parser.eventRecords.KeywordExtractionEvent;
 import com.NeuroIndex.parser.repositories.AffiliatedEmailsRepo;
 import com.NeuroIndex.parser.repositories.ConversationRepo;
 import com.NeuroIndex.parser.repositories.MessageRepo;
+import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.service.ClaudeIngestionService;
+import com.NeuroIndex.parser.service.KeyWordExtractionService;
 import com.NeuroIndex.parser.service.SemanticFragmentationService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.EntityManager;
 import jakarta.transaction.Transactional;
 import lombok.extern.log4j.Log4j2;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
+
+import static jakarta.transaction.Status.STATUS_COMMITTED;
+import static org.springframework.transaction.support.TransactionSynchronization.STATUS_ROLLED_BACK;
 
 @Service
 @Log4j2
@@ -32,29 +45,72 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
     private final ConversationRepo conversationRepo;
     private final MessageRepo messageRepo;
     private final AffiliatedEmailsRepo affiliatedEmailRepo;
-    private final ExecutorService executorService;
     private final ObjectMapper objectMapper;
     private final SemanticFragmentationService semanticFragmentationService;
+    private final ApplicationEventPublisher eventPublisher;
+    private final KeyWordExtractionService keywordExtractionService;
+    private final Executor keywordExtractionExecutor;
+    private final SemanticFragmentRepo semanticFragmentRepo;
+    private final EntityManager entityManager;
+    private final JdbcTemplate jdbcTemplate;
+
+    private static final int KEYWORD_EXTRACTION_BATCH_SIZE = 100;
 
     ClaudeIngestionServiceImpl(ConversationRepo conversationRepo,
                                MessageRepo messageRepo,
                                AffiliatedEmailsRepo affiliatedEmailRepo,
-                               ExecutorService executorService,
                                ObjectMapper objectMapper,
-                               SemanticFragmentationService semanticFragmentationService) {
+                               SemanticFragmentationService semanticFragmentationService,
+                               KeyWordExtractionService keywordExtractionService,
+                               ApplicationEventPublisher eventPublisher,
+                               @Qualifier("keywordExtractionExecutor")
+                               Executor keywordExtractionExecutor, SemanticFragmentRepo semanticFragmentRepo, EntityManager entityManager, JdbcTemplate jdbcTemplate) {
         this.conversationRepo = conversationRepo;
         this.messageRepo = messageRepo;
         this.affiliatedEmailRepo = affiliatedEmailRepo;
-        this.executorService = executorService;
         this.objectMapper = objectMapper;
         this.semanticFragmentationService = semanticFragmentationService;
+        this.keywordExtractionService = keywordExtractionService;
+        this.eventPublisher = eventPublisher;
+        this.keywordExtractionExecutor = keywordExtractionExecutor;
+        this.semanticFragmentRepo = semanticFragmentRepo;
+        this.entityManager = entityManager;
+        this.jdbcTemplate = jdbcTemplate;
     }
 
     @Transactional
-    public void ingestClaudeConversations(
+    public List<Conversation> ingestClaudeConversations(
             AffiliatedEmail affiliatedEmail,
             List<ClaudeConversationJsonDTO> conversationsDTO
     ) throws JsonProcessingException {
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(
+                    new TransactionSynchronization() {
+
+                        @Override
+                        public void afterCommit() {
+                            log.info(
+                                    "Claude ingestion transaction committed"
+                            );
+                        }
+
+                        @Override
+                        public void afterCompletion(int status) {
+                            String result = switch (status) {
+                                case STATUS_COMMITTED -> "COMMITTED";
+                                case STATUS_ROLLED_BACK -> "ROLLED_BACK";
+                                default -> "UNKNOWN";
+                            };
+
+                            log.info(
+                                    "Claude ingestion transaction completed: {}",
+                                    result
+                            );
+                        }
+                    }
+            );
+        }
 
         Set<String> existingConversationHashes =
                 conversationRepo.findAllHashes();
@@ -65,17 +121,16 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
         List<Conversation> conversationsToSave =
                 new ArrayList<>();
 
-        // map to hold messages and their semantic units
-        // so we can fragment after persist
         Map<Message, List<SemanticUnit>> fragmentationQueue =
                 new LinkedHashMap<>();
 
         for (ClaudeConversationJsonDTO dto : conversationsDTO) {
-
             String conversationHash =
                     hashConversation(dto);
 
-            if (existingConversationHashes.contains(conversationHash)) {
+            if (existingConversationHashes.contains(
+                    conversationHash
+            )) {
                 continue;
             }
 
@@ -97,17 +152,174 @@ public class ClaudeIngestionServiceImpl implements ClaudeIngestionService {
             conversation.setMessages(messages);
 
             conversationsToSave.add(conversation);
-
             existingConversationHashes.add(conversationHash);
         }
 
-        // persist first — messages get their IDs here
-        conversationRepo.saveAllAndFlush(conversationsToSave);
+        /*
+         * Persist conversations and messages first so message IDs exist.
+         */
+        conversationRepo.saveAllAndFlush(
+                conversationsToSave
+        );
 
-        // fragment after persist — message IDs now exist in db
+        /*
+         * Native fragment inserts execute immediately.
+         */
         fragmentationQueue.forEach(
                 semanticFragmentationService::messageSemanticFragmentation
         );
+
+        /*
+         * A JdbcTemplate query does not trigger a Hibernate automatic flush.
+         * It shows the rows produced by the native inserts.
+         */
+        Long fragmentsBeforeFlush =
+                jdbcTemplate.queryForObject(
+                        """
+                        SELECT COUNT(*)
+                        FROM public.semantic_fragments
+                        """,
+                        Long.class
+                );
+
+        log.info(
+                "Semantic fragment count before Hibernate flush: {}",
+                fragmentsBeforeFlush
+        );
+
+        log.info(
+                "Transaction rollback-only before flush: {}",
+                TransactionAspectSupport
+                        .currentTransactionStatus()
+                        .isRollbackOnly()
+        );
+
+        /*
+         * Flush pending Hibernate entity/relationship changes.
+         */
+        entityManager.flush();
+
+        Long fragmentsAfterFlush =
+                jdbcTemplate.queryForObject(
+                        """
+                        SELECT COUNT(*)
+                        FROM public.semantic_fragments
+                        """,
+                        Long.class
+                );
+
+        log.info(
+                "Semantic fragment count after Hibernate flush: {}",
+                fragmentsAfterFlush
+        );
+
+        log.info(
+                "Transaction rollback-only after flush: {}",
+                TransactionAspectSupport
+                        .currentTransactionStatus()
+                        .isRollbackOnly()
+        );
+
+        return conversationsToSave;
+    }
+
+    public CompletableFuture<Void> keywordExtractionInitiation(
+            AffiliatedEmail affiliatedEmail,
+            List<Conversation> conversations
+    ) {
+        if (affiliatedEmail == null || conversations == null || conversations.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        LLm llm = affiliatedEmail.getLlm();
+
+        if (llm == null || llm.getUser() == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException(
+                            "Affiliated email is not connected to an LLM and user"
+                    )
+            );
+        }
+
+        User user = llm.getUser();
+
+        List<LuceneKeywordExtractDTO> extractionItems =
+                buildKeywordExtractionItems(user, llm, conversations);
+
+        if (extractionItems.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        List<CompletableFuture<Void>> tasks = new ArrayList<>();
+
+        for (int start = 0;
+             start < extractionItems.size();
+             start += KEYWORD_EXTRACTION_BATCH_SIZE) {
+
+            int end = Math.min(
+                    start + KEYWORD_EXTRACTION_BATCH_SIZE,
+                    extractionItems.size()
+            );
+
+            /*
+             * Make an independent copy. Do not give an asynchronous task a
+             * subList backed by the mutable extractionItems list.
+             */
+            List<LuceneKeywordExtractDTO> batch =
+                    List.copyOf(extractionItems.subList(start, end));
+
+            CompletableFuture<Void> task = CompletableFuture.runAsync(
+                    () -> keywordExtractionService.extractingKeyWords(batch),
+                    keywordExtractionExecutor
+            );
+
+            tasks.add(task);
+        }
+
+        return CompletableFuture.allOf(
+                tasks.toArray(CompletableFuture[]::new)
+        );
+    }
+
+    private List<LuceneKeywordExtractDTO> buildKeywordExtractionItems(
+            User user,
+            LLm llm,
+            List<Conversation> conversations
+    ) {
+        List<LuceneKeywordExtractDTO> extractionItems =
+                new ArrayList<>();
+
+        for (Conversation conversation : conversations) {
+            if (conversation == null || conversation.getMessages() == null) {
+                continue;
+            }
+
+            for (Message message : conversation.getMessages()) {
+                if (message == null || message.getSemanticFragments() == null) {
+                    continue;
+                }
+
+                for (SemanticFragment fragment : message.getSemanticFragments()) {
+                    if (fragment == null || fragment.getId() == null) {
+                        continue;
+                    }
+
+                    extractionItems.add(
+                            LuceneKeywordExtractDTO.builder()
+                                    .userId(user.getId())
+                                    .llmId(llm.getId())
+                                    .conversationId(conversation.getId())
+                                    .messageId(message.getId())
+                                    .semanticFragmentId(fragment.getId())
+                                    .text(fragment.getText())
+                                    .embeddings(fragment.getEmbedding())
+                                    .build()
+                    );
+                }
+            }
+        }
+
+        return extractionItems;
     }
 
     private Conversation buildConversation(

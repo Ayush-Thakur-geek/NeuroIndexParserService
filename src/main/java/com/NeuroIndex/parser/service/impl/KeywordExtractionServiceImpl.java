@@ -1,11 +1,1002 @@
 package com.NeuroIndex.parser.service.impl;
 
+import com.NeuroIndex.parser.dtos.LuceneIndexDataDTO;
+import com.NeuroIndex.parser.dtos.LuceneKeywordExtractDTO;
+import com.NeuroIndex.parser.dtos.PhraseToNodeDTO;
+import com.NeuroIndex.parser.exception.CustomException;
+import com.NeuroIndex.parser.helperClasses.KeywordCandidate;
+import com.NeuroIndex.parser.helperClasses.KeywordEmbeddingAccumulator;
+import com.NeuroIndex.parser.service.GraphFormationService;
+import com.NeuroIndex.parser.service.HashingSHA256Service;
 import com.NeuroIndex.parser.service.KeyWordExtractionService;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.log4j.Log4j2;
+import org.apache.lucene.document.*;
+import org.apache.lucene.index.*;
+import org.apache.lucene.search.*;
+import org.apache.lucene.util.BytesRef;
 import org.springframework.stereotype.Service;
+import redis.clients.jedis.UnifiedJedis;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.stream.Collectors;
 
 @Service
+@Log4j2
 public class KeywordExtractionServiceImpl implements KeyWordExtractionService {
-    public void extractingAndIndexing() {
 
+    private final IndexWriter indexWriter;
+    private final ExecutorService executorService;
+    private static final FieldType BODY_FIELD_TYPE;
+    private final ConcurrentHashMap<Long, ConcurrentHashMap<String, KeywordEmbeddingAccumulator>> keywordAccumulator;
+    private final ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase;
+    private final UnifiedJedis jedis;
+    private final ObjectMapper objectMapper;
+    private final ConcurrentHashMap<Long, ConcurrentHashMap<String, Integer>> phraseOccurrenceByUser;
+    private DirectoryReader directoryReader;
+    private final SearcherManager searcherManager;
+    private final GraphFormationService graphFormationService;
+    private final HashingSHA256Service hashingService;
+
+    // Tunable constants
+//    private static final float THRESHOLD_FILTER_FOR_KEYWORDS;
+    private static final int    MIN_KEYWORD_LENGTH          = 3;
+    private static final int    MAX_KEYWORD_LENGTH          = 50;
+    private static final int    MIN_DOC_FREQUENCY           = 2;   // ignore hapax legomena
+    private static final double SCORE_PERCENTILE_THRESHOLD  = 0.60; // keep top 40 % by score mass
+    private static final double BM25_K1                     = 1.5;
+    private static final double BM25_B                      = 0.75;
+    private static final double MIN_SCORE_RATIO   = 0.35;  // keep terms ≥ 35% of the doc's best
+    private static final double SCORE_MASS_BUDGET = 0.60;
+    private static final int    MAX_KEYWORDS      = 15;    // bounds Redis writes per fragment
+    // Replaces the hand-maintained Set.of(...) list. EnglishAnalyzer's bundled
+    // stopword set is the SMART list — a standard, well-vetted IR stopword
+    // list — so coverage gaps like missing "some"/"here" can't recur silently.
+    // CharArraySet wraps char[] internally for memory efficiency; .contains()
+    // accepts CharSequence/String directly, so no conversion needed at call sites.
+//    private static final CharArraySet STOPWORDS = EnglishAnalyzer.ENGLISH_STOP_WORDS_SET;
+    private static final Set<String> STOPWORDS = Set.of(
+
+            // Articles
+            "a","an","the",
+
+            // Pronouns
+            "i","me","my","mine","myself",
+            "you","your","yours","yourself","yourselves",
+            "he","him","his","himself",
+            "she","her","hers","herself",
+            "it","its","itself",
+            "we","us","our","ours","ourselves",
+            "they","them","their","theirs","themselves",
+
+            // Demonstratives
+            "this","that","these","those",
+
+            // Conjunctions
+            "and","or","but","nor","yet","so",
+
+            // Prepositions
+            "of","in","on","at","to","for","from","by","with","without",
+            "into","onto","upon","over","under","between","among",
+            "through","across","around","about","against","before","after",
+            "during","inside","outside","within","beyond","near","towards","toward",
+
+            // Auxiliary verbs
+            "is","am","are","was","were","be","been","being",
+            "have","has","had","having",
+            "do","does","did","doing",
+
+            // Modal verbs
+            "can","could","may","might","must","shall","should","will","would",
+
+            // Negations
+            "not","no","none","never","cannot","cant","don't","dont","doesn't",
+            "doesnt","didn't","didnt","won't","wont","isn't","isnt","aren't","arent",
+
+            // Quantifiers
+            "all","any","both","each","every","few","many","much",
+            "more","most","less","least","several","some","such","another",
+            "either","neither","enough",
+
+            // Adverbs
+            "also","just","only","very","too","quite","rather",
+            "almost","already","still","even","again","ever",
+            "always","often","sometimes","usually","generally",
+
+            // Question words
+            "what","which","who","whom","whose","when","where","why","how",
+
+            // Misc
+            "than","then","there","here","thus","therefore","however",
+            "because","although","though","while","whether","if","else",
+            "yes","nope","okay","ok",
+
+            // LLM conversational words
+            "working",
+            "proper",
+            "correct",
+            "good",
+            "great",
+            "nice",
+            "excellent",
+            "perfect",
+            "important",
+            "recommended",
+            "recommendation",
+            "recommendations",
+            "observation",
+            "observations",
+            "suggestion",
+            "suggestions",
+            "approach",
+            "approaches",
+            "solution",
+            "solutions",
+            "implementation",
+            "implementations",
+            "example",
+            "examples",
+            "overview",
+            "summary",
+            "note",
+            "notes",
+            "idea",
+            "ideas",
+            "thought",
+            "thoughts",
+            "discussion",
+            "analysis",
+            "consideration",
+            "considerations",
+            "option",
+            "options",
+            "possibility",
+            "possible",
+            "simply",
+            "basically",
+            "essentially",
+            "actually",
+            "overall",
+            "first",
+            "second",
+            "third",
+            "finally",
+            "next",
+            "following",
+
+            // Review words
+            "issue",
+            "issues",
+            "problem",
+            "problems",
+            "fix",
+            "fixed",
+            "bug",
+            "bugs",
+            "error",
+            "errors",
+            "warning",
+            "warnings",
+
+            // Common filler
+            "using",
+            "used",
+            "use",
+            "getting",
+            "got",
+            "make",
+            "made",
+            "need",
+            "needs",
+            "want",
+            "wants",
+            "look",
+            "looking",
+            "looks",
+            "see",
+            "seeing",
+            "check",
+            "checking",
+            "found",
+            "find",
+            "trying",
+            "try",
+            "works",
+            "work",
+            "helps",
+            "help",
+            "ensure",
+            "ensures"
+    );
+
+    static {
+        BODY_FIELD_TYPE = new FieldType();
+        BODY_FIELD_TYPE.setStored(true);
+        BODY_FIELD_TYPE.setTokenized(true);
+        BODY_FIELD_TYPE.setStoreTermVectors(true);
+        BODY_FIELD_TYPE.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS);
+        BODY_FIELD_TYPE.freeze();
+
+//        THRESHOLD_FILTER_FOR_KEYWORDS = 3.0f; // now actually enforced
+    }
+
+    KeywordExtractionServiceImpl(
+            IndexWriter indexWriter,
+            ExecutorService executorService,
+            ConcurrentHashMap<Long, ConcurrentHashMap<String, KeywordEmbeddingAccumulator>> keywordAccumulator,
+            ConcurrentHashMap<Long, List<String>> fragmentIdToNounPhrase,
+            ObjectMapper objectMapper,
+            UnifiedJedis jedis,
+            ConcurrentHashMap<Long, ConcurrentHashMap<String, Integer>> phraseOccurrenceByUser,
+            GraphFormationService graphFormationService,
+            HashingSHA256Service hashingService
+    ) throws IOException {
+        this.indexWriter        = indexWriter;
+        this.executorService    = executorService;
+        this.keywordAccumulator = keywordAccumulator;
+        this.fragmentIdToNounPhrase = fragmentIdToNounPhrase;
+        this.objectMapper = objectMapper;
+        this.jedis = jedis;
+        this.phraseOccurrenceByUser = phraseOccurrenceByUser;
+        // constructor — replaces this.directoryReader = DirectoryReader.open(indexWriter);
+        this.searcherManager = new SearcherManager(indexWriter, true, true, null);
+
+        this.graphFormationService = graphFormationService;
+        this.hashingService = hashingService;
+    }
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+    @Override
+    public void extractingKeyWords(List<LuceneKeywordExtractDTO> batch) {
+        if (batch == null || batch.isEmpty()) return;
+
+        IndexSearcher searcher;
+        try {
+            searcherManager.maybeRefresh();
+            searcher = searcherManager.acquire();
+        } catch (IOException e) {
+            throw new CustomException(e.getMessage(), "KEYWORD_EXTRACTION_ERROR", 500, e);
+        }
+
+        try {
+            IndexReader reader = searcher.getIndexReader();
+
+            Map<Long, Integer> fragmentToDocIdMap = buildFragmentDocIdMap(searcher, getBatchIds(batch));
+            int   totalDocs    = reader.numDocs();
+
+            TermVectors termVectors = reader.termVectors();
+            float avgDocLength = computeAverageDocLength(searcher);          // hoisted
+
+            Map<Long, Set<String>> touchedKeywordsByUser = new HashMap<>();
+
+            for (LuceneKeywordExtractDTO dto : batch) {
+                try {                                                 // per-item isolation
+                    Integer docId = fragmentToDocIdMap.get(dto.getSemanticFragmentId());
+                    if (docId == null || dto.getEmbeddings() == null) continue;
+
+                    Terms terms = termVectors.get(docId, "body");
+                    if (terms == null) continue;
+
+                    int docLength = (int) terms.getSumTotalTermFreq();   // no refetch
+
+                    List<KeywordCandidate> candidates =
+                            scoreCandidates(reader, terms, totalDocs, docLength, avgDocLength);
+                    if (candidates.isEmpty()) continue;
+
+                    // Normalize ONCE — this form is now the only key used anywhere.
+                    Set<String> selectedKeywords = selectByScoreDistribution(candidates).stream()
+                            .map(KeywordCandidate::keyword)
+                            .map(this::normalizeWords)
+                            .filter(k -> !k.isBlank())
+                            .filter(k -> !STOPWORDS.contains(k))
+                            .collect(Collectors.toSet());
+                    if (selectedKeywords.isEmpty()) continue;
+
+                    Long userId = dto.getUserId();
+                    accumulateEmbeddings(userId, selectedKeywords, dto.getEmbeddings());
+                    touchedKeywordsByUser
+                            .computeIfAbsent(userId, id -> new HashSet<>())
+                            .addAll(selectedKeywords);
+
+                    List<String> nounPhrases = fragmentIdToNounPhrase.getOrDefault(
+                            dto.getSemanticFragmentId(), Collections.emptyList());
+                    HashSet<PhraseToNodeDTO> normalizedPhrases = recordPhraseOccurrences(userId,
+                            filterPhrasesByKeywordOverlap(userId, nounPhrases, selectedKeywords));
+
+                    graphFormationService.initialPreparations(
+                            userId,
+                            dto.getSemanticFragmentId(),
+                            normalizedPhrases,
+                            selectedKeywords
+                    );
+
+                    String logText = "Selected keywords: " + selectedKeywords
+                            + "\nvalid phrases: " + normalizedPhrases.stream()
+                            .map(PhraseToNodeDTO::getNounPhrase)
+                            .collect(Collectors.toList())
+                            + "\noriginal text: " + dto.getText()
+                            + "\n--------------------------------------------------------------------------------------";
+
+                    Files.writeString(
+                            Paths.get("debug.txt"),
+                            logText + System.lineSeparator(),
+                            StandardOpenOption.CREATE,
+                            StandardOpenOption.APPEND
+                    );
+
+
+
+                    fragmentIdToNounPhrase.remove(dto.getSemanticFragmentId());   // stops the leak
+
+                    if (log.isDebugEnabled()) {
+                        log.debug("fragment={} keywords={}", dto.getSemanticFragmentId(), selectedKeywords);
+                    }
+                } catch (Exception perItem) {
+                    log.error("Failed fragment {}", dto.getSemanticFragmentId(), perItem);
+                }
+            }
+
+            for (Map.Entry<Long, Set<String>> e : touchedKeywordsByUser.entrySet()) {
+                computeCentroids(e.getKey(), e.getValue());
+            }
+        } catch (Exception e) {
+            log.error("Error extracting keywords", e);
+            throw new CustomException(e.getMessage(), "KEYWORD_EXTRACTION_ERROR", 500, e);
+        } finally {
+            try {
+                searcherManager.release(searcher);                     // must be in finally
+            } catch (IOException ignored) { }
+        }
+    }
+
+    private Collection<Long> getBatchIds(List<LuceneKeywordExtractDTO> batch) {
+        Collection<Long> ids = new HashSet<>();
+        for (LuceneKeywordExtractDTO dto : batch) {
+            ids.add(dto.getSemanticFragmentId());
+        }
+        return ids;
+    }
+
+    // Per-user record of which phrases exist as graph-node candidates,
+    // and how often each was observed. No vector data — vectors are
+    // derived on demand from keyword centroids when something needs them.
+
+    private HashSet<PhraseToNodeDTO> recordPhraseOccurrences(Long userId, List<String> validPhrases) {
+
+        ConcurrentHashMap<String, Integer> userPhrases =
+                phraseOccurrenceByUser.computeIfAbsent(userId, id -> new ConcurrentHashMap<>());
+        HashSet<PhraseToNodeDTO> normalizedPhrases = new HashSet<>();
+
+        for (String phrase : validPhrases) {
+            String normalized = normalizePhrase(phrase);
+            if (normalized.isEmpty()) continue;
+            PhraseToNodeDTO phraseToNodeDTO = PhraseToNodeDTO.builder()
+                    .userId(userId)
+                    .nounPhrase(normalized)
+                    .hash(hashingService.hash(normalized))
+                    .build();
+            normalizedPhrases.add(phraseToNodeDTO);
+
+            userPhrases.merge(normalized, 1, Integer::sum);
+        }
+        return normalizedPhrases;
+    }
+
+    /**
+     * Filters noun phrases by overlap with BM25-selected keywords, then
+     * persists the surviving phrase → matched-keywords mapping to Redis.
+     *
+     * Redis structure: HSET phrasesToKeywords:user:{userId}
+     *   field = normalized phrase string
+     *   value = JSON array of matched keyword strings
+     *   e.g. "websocket endpoints" → ["websocket", "endpoint"]
+     *
+     * A phrase with N words needs at least one word matching a selected
+     * keyword to survive — same permissive threshold as before, since
+     * BM25 selection is already the quality gate upstream.
+     */
+    private synchronized List<String> filterPhrasesByKeywordOverlap(
+            long userId,
+            List<String> nounPhrases,
+            Set<String> selectedKeywords
+    ) throws JsonProcessingException {
+        if (nounPhrases.isEmpty() || selectedKeywords.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        log.info("nounPhrases: {}", nounPhrases);
+
+        List<String> validPhrases = new ArrayList<>();
+        String redisKey = "phrasesToKeywords:user:" + userId;
+
+        for (String phrase : nounPhrases) {
+            if (phrase == null || phrase.isBlank()) continue;
+
+            // Collect which selected keywords this phrase's words match.
+            // Uses Set.contains() directly — O(1) per word, not an inner
+            // loop over selectedKeywords which would be O(n*m).
+            List<String> matchedKeywords = Arrays.stream(phrase.trim().split("\\s+"))
+                    .map(this::normalizeWords)
+                    .filter(w -> !w.isEmpty())
+                    .filter(selectedKeywords::contains)
+                    .distinct()
+                    .collect(Collectors.toList());
+
+            if (matchedKeywords.isEmpty()) continue;
+
+            validPhrases.add(phrase);
+
+            // Persist phrase → matched keywords to Redis.
+            // Key is the normalized phrase so lookups are consistent with
+            // normalizePhrase() used everywhere else in the pipeline.
+            String normalizedPhrase = normalizePhrase(phrase);
+
+            mappingKeywordsToPhrase(userId, matchedKeywords, normalizedPhrase);
+
+            try {
+                // Merge with any existing matched keywords for this phrase
+                // across previous batches — same fragment can re-appear
+                // with different selected keywords as the corpus grows and
+                // BM25 scores stabilize, so we accumulate rather than overwrite.
+                String existing = jedis.hget(redisKey, normalizedPhrase);
+
+                List<String> mergedKeywords;
+                if (existing != null) {
+                    List<String> previousKeywords = objectMapper.readValue(
+                            existing,
+                            new TypeReference<List<String>>() {}
+                    );
+                    Set<String> merged = new LinkedHashSet<>(previousKeywords);
+                    merged.addAll(matchedKeywords);
+                    mergedKeywords = new ArrayList<>(merged);
+                } else {
+                    mergedKeywords = matchedKeywords;
+                }
+
+                jedis.hset(redisKey, normalizedPhrase, objectMapper.writeValueAsString(mergedKeywords));
+
+            } catch (JsonProcessingException e) {
+                log.error("Failed to serialize matched keywords for phrase [{}]: {}", normalizedPhrase, e.getMessage());
+                // Don't rethrow — a Redis write failure for one phrase
+                // shouldn't abort the rest of the batch.
+            }
+        }
+
+        log.info("validPhrases: {}", validPhrases);
+        return validPhrases;
+    }
+
+    private synchronized void mappingKeywordsToPhrase(
+            long userId,
+            List<String> keywords,
+            String phrase
+    ) throws JsonProcessingException {
+
+        if (keywords == null
+                || keywords.isEmpty()
+                || phrase == null
+                || phrase.isBlank()) {
+            return;
+        }
+
+        String normalizedPhrase = normalizePhrase(phrase);
+
+        if (normalizedPhrase == null || normalizedPhrase.isBlank()) {
+            return;
+        }
+
+        String redisKey = "wordsToPhrases:user:" + userId;
+
+        for (String keyword : keywords) {
+            String normalizedKeyword = normalizeWords(keyword);
+
+            if (normalizedKeyword == null || normalizedKeyword.isBlank()) {
+                continue;
+            }
+
+            Set<String> mergedPhrases = new LinkedHashSet<>();
+
+            String existing = jedis.hget(
+                    redisKey,
+                    normalizedKeyword
+            );
+
+            if (existing != null && !existing.isBlank()) {
+                List<String> previousPhrases =
+                        objectMapper.readValue(
+                                existing,
+                                new TypeReference<List<String>>() {}
+                        );
+
+                mergedPhrases.addAll(previousPhrases);
+            }
+
+            mergedPhrases.add(normalizedPhrase);
+
+            // Serialize the collection exactly once.
+            jedis.hset(
+                    redisKey,
+                    normalizedKeyword,
+                    objectMapper.writeValueAsString(mergedPhrases)
+            );
+        }
+    }
+
+    private String normalizeWords(String word) {
+        if (word == null) return "";
+        return word.toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]", ""); // strip underscores, punctuation, etc.
+    }
+
+// ---------------------------------------------------------------------------
+// Step 1 – index scan (unchanged shape, extracted for clarity)
+// ---------------------------------------------------------------------------
+
+    // Before: iterate maxDoc, read stored fields for every doc, build a global map
+// After: one query for exactly the ids in this batch
+
+    private Map<Long, Integer> buildFragmentDocIdMap(IndexSearcher searcher, Collection<Long> batchIds)
+            throws IOException {
+        if (batchIds.isEmpty()) return Map.of();
+
+        Query q = LongPoint.newSetQuery("semanticFragmentId",
+                batchIds.stream().mapToLong(Long::longValue).toArray());
+
+        Map<Long, Integer> out = new HashMap<>(batchIds.size() * 2);
+
+        searcher.search(q, new SimpleCollector() {
+            private int docBase;
+            private NumericDocValues fragmentIds;
+
+            @Override
+            protected void doSetNextReader(LeafReaderContext ctx) throws IOException {
+                this.docBase     = ctx.docBase;
+                this.fragmentIds = ctx.reader().getNumericDocValues("semanticFragmentId_dv");
+            }
+
+            @Override
+            public void collect(int doc) throws IOException {
+                if (fragmentIds == null || !fragmentIds.advanceExact(doc)) return;
+                out.put(fragmentIds.longValue(), docBase + doc);   // leaf-local doc for DV, global for the map
+            }
+
+            @Override
+            public ScoreMode scoreMode() {
+                return ScoreMode.COMPLETE_NO_SCORES;
+            }
+        });
+
+        return out;
+    }
+
+// ---------------------------------------------------------------------------
+// Step 2a – corpus average document length for BM25
+// ---------------------------------------------------------------------------
+
+    private float computeAverageDocLength(IndexSearcher searcher) throws IOException {
+        CollectionStatistics stats = searcher.collectionStatistics("body");
+        if (stats == null || stats.docCount() == 0) return 1.0f;
+
+        long sumTtf = stats.sumTotalTermFreq();
+        if (sumTtf <= 0) return 1.0f;          // field indexed without freqs
+
+        return (float) sumTtf / stats.docCount();
+    }
+
+// ---------------------------------------------------------------------------
+// Step 2b – per-document token count
+// ---------------------------------------------------------------------------
+
+    private int computeDocLength(DirectoryReader reader, int docId) throws IOException {
+        Terms terms = reader.termVectors().get(docId, "body");
+        if (terms == null) return 1;
+        return (int) terms.getSumTotalTermFreq();
+    }
+
+// ---------------------------------------------------------------------------
+// Step 3 – score all terms in one document using BM25
+// ---------------------------------------------------------------------------
+
+    private List<KeywordCandidate> scoreCandidates(
+            IndexReader reader,
+            Terms           terms,
+            int             totalDocs,
+            int             docLength,
+            float           avgDocLength
+    ) throws IOException {
+
+        TermsEnum termsEnum = terms.iterator();
+        List<KeywordCandidate> candidates = new ArrayList<>();
+        BytesRef termRef;
+
+        while ((termRef = termsEnum.next()) != null) {
+
+            String keyword = termRef.utf8ToString().toLowerCase();
+
+            log.info("keyword: {}", keyword);
+
+            // --- Noise filters -------------------------------------------------
+            if (!isValidKeyword(keyword)) continue;
+
+            int df = reader.docFreq(new Term("body", keyword));
+
+            log.info(
+                    "{} -> tf:{}, df:{}",
+                    keyword,
+                    termsEnum.totalTermFreq(),
+                    df
+            );
+
+            // Ignore very rare terms (likely noise / OCR errors)
+            if (df < MIN_DOC_FREQUENCY) continue;
+
+            long rawTf = termsEnum.totalTermFreq();
+
+            // --- BM25 score ----------------------------------------------------
+            double bm25Score = computeBM25(rawTf, df, totalDocs, docLength, avgDocLength);
+            log.info(
+                    "{} -> tf:{}, df:{}, bm25 score:{}",
+                    keyword,
+                    termsEnum.totalTermFreq(),
+                    df,
+                    bm25Score
+            );
+
+//            if (bm25Score < THRESHOLD_FILTER_FOR_KEYWORDS) continue;
+
+            candidates.add(new KeywordCandidate(keyword, bm25Score));
+        }
+
+        return candidates;
+    }
+
+// ---------------------------------------------------------------------------
+// BM25 scoring (self-consistent, length-normalised)
+// ---------------------------------------------------------------------------
+
+    private double computeBM25(
+            long  tf,
+            int   df,
+            int   totalDocs,
+            int   docLength,
+            float avgDocLength
+    ) {
+        // Standard Robertson/Sparck-Jones IDF (always ≥ 0)
+        double idf = Math.log(1.0 + (totalDocs - df + 0.5) / (df + 0.5));
+
+        // Length-normalised TF
+        double normTf = (tf * (BM25_K1 + 1.0))
+                / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * docLength / avgDocLength));
+
+        return idf * normTf;
+    }
+
+// ---------------------------------------------------------------------------
+// Token validity guards
+// ---------------------------------------------------------------------------
+
+    private boolean isValidKeyword(String token) {
+        if (token == null) return false;
+        int len = token.length();
+        if (len < MIN_KEYWORD_LENGTH || len > MAX_KEYWORD_LENGTH) return false;
+        if (STOPWORDS.contains(token.toLowerCase(Locale.ROOT)))   return false;
+        if (!token.chars().anyMatch(Character::isLetter))         return false;
+        if (token.chars().filter(c -> !Character.isLetterOrDigit(c) && c != '-' && c != '_').count() > 2)
+            return false;
+        return true;
+    }
+
+// ---------------------------------------------------------------------------
+// Step 4 – score-distribution-based selection (replaces hard top-K)
+// ---------------------------------------------------------------------------
+
+    /**
+     * Keeps candidates whose cumulative score mass is within the top
+     * {@code SCORE_PERCENTILE_THRESHOLD} fraction, AND whose individual score
+     * is above the mean.  This is adaptive: a document with 2 strong keywords
+     * keeps 2; one with 20 evenly-scored terms keeps ~8–12.
+     */
+    private List<KeywordCandidate> selectByScoreDistribution(List<KeywordCandidate> candidates) {
+        if (candidates.isEmpty()) return candidates;
+
+        List<KeywordCandidate> sorted = new ArrayList<>(candidates);   // don't mutate caller's list
+        sorted.sort(Comparator.comparingDouble(KeywordCandidate::score).reversed());
+
+        double maxScore   = sorted.getFirst().score();
+        if (maxScore <= 0) return List.of();
+        double totalScore = sorted.stream().mapToDouble(KeywordCandidate::score).sum();
+        double budget     = totalScore * SCORE_MASS_BUDGET;
+
+        List<KeywordCandidate> selected = new ArrayList<>();
+        double accumulated = 0.0;
+
+        for (KeywordCandidate c : sorted) {
+            if (selected.size() >= MAX_KEYWORDS)          break;
+            if (c.score() / maxScore < MIN_SCORE_RATIO)   break;   // scale-free drop-off
+            if (accumulated >= budget && !selected.isEmpty()) break;
+            selected.add(c);
+            accumulated += c.score();
+        }
+
+        return selected;
+    }
+
+// ---------------------------------------------------------------------------
+// Step 5 – thread-safe embedding accumulation (fixed race condition)
+// ---------------------------------------------------------------------------
+
+    private Set<String> accumulateEmbeddings(Long userId, Set<String> keywords, float[] embedding) {
+
+        ConcurrentHashMap<String, KeywordEmbeddingAccumulator> userAccumulator =
+                keywordAccumulator.computeIfAbsent(userId, id -> new ConcurrentHashMap<>());
+
+        Set<String> touched = new HashSet<>();
+
+        for (String keyword : keywords) {
+
+            KeywordEmbeddingAccumulator acc = userAccumulator.computeIfAbsent(
+                    keyword,
+                    k -> new KeywordEmbeddingAccumulator(new float[embedding.length], 0)
+            );
+
+            synchronized (acc) {
+                float[] sum = acc.getEmbeddingSum();
+                for (int j = 0; j < embedding.length; j++) {
+                    sum[j] += embedding[j];
+                }
+                acc.incrementCount();
+            }
+
+            touched.add(keyword);
+        }
+
+        return touched;
+    }
+
+    @Override
+    public void indexing(LuceneIndexDataDTO luceneIndexDataDTO) {
+        try {
+            Document document = new Document();
+            // in indexing()
+            long fragmentId = luceneIndexDataDTO.getSemanticFragmentId();
+            document.add(
+                    new LongPoint("semanticFragmentId",
+                            fragmentId)
+            );                  // searchable
+            document.add(
+                    new NumericDocValuesField("semanticFragmentId_dv",
+                            fragmentId)
+            );   // fast per-doc read
+            document.add(
+                    new StoredField("semanticFragmentId_store",
+                            fragmentId)
+            );          // keep only if an API response needs it
+            document.add(
+                    new LongPoint("userId",
+                            luceneIndexDataDTO.getUserId())
+            );
+
+            document.add(
+                    new LongPoint("llmId",
+                            luceneIndexDataDTO.getLlmId())
+            );
+
+            document.add(
+                    new LongPoint("affiliatedEmailId",
+                            luceneIndexDataDTO.getAffiliatedEmailId())
+            );
+
+            document.add(
+                    new LongPoint("conversationId",
+                            luceneIndexDataDTO.getConversationId())
+            );
+
+            document.add(
+                    new LongPoint("messageId",
+                            luceneIndexDataDTO.getMessageId())
+            );
+
+//            document.add(
+//                    new LongPoint("semanticFragmentId",
+//                            luceneIndexDataDTO.getSemanticFragmentId())
+//            );
+
+            document.add(
+                    new StoredField("userId_store",
+                            luceneIndexDataDTO.getUserId())
+            );
+
+            document.add(
+                    new StoredField("llmId_store",
+                            luceneIndexDataDTO.getLlmId())
+            );
+
+            document.add(
+                    new StoredField("affiliatedEmailId_store",
+                            luceneIndexDataDTO.getAffiliatedEmailId())
+            );
+
+            document.add(
+                    new StoredField("conversationId_store",
+                            luceneIndexDataDTO.getConversationId())
+            );
+
+            document.add(
+                    new StoredField("messageId_store",
+                            luceneIndexDataDTO.getMessageId())
+            );
+
+//            document.add(
+//                    new StoredField("semanticFragmentId_store",
+//                            luceneIndexDataDTO.getSemanticFragmentId())
+//            );
+
+            document.add(
+                    new LongPoint(
+                            "timestamp",
+                            System.currentTimeMillis()
+                    )
+            );
+
+            document.add(
+                    new StoredField(
+                            "timestamp_store",
+                            System.currentTimeMillis()
+                    )
+            );
+
+            document.add(
+                    new Field(
+                            "body",
+                            luceneIndexDataDTO.getText(),
+                            BODY_FIELD_TYPE
+                    )
+            );
+            fragmentIdToNounPhrase.put(luceneIndexDataDTO.getSemanticFragmentId(), luceneIndexDataDTO.getNounPhrases());
+            indexWriter.addDocument(document);
+            indexWriter.commit();
+
+        } catch (IOException e) {
+            log.error("Error while opening the index doc: {}", e);
+            throw new CustomException(
+                    e.getMessage(),
+                    "DOC_OPENEING_ERROR",
+                    500,
+                    e
+            );
+        }
+    }
+
+    private void computeCentroids(Long userId, Set<String> touchedKeywords) {
+
+        String redisKey = "centroids:user:" + userId;
+
+        ConcurrentHashMap<String, KeywordEmbeddingAccumulator> userAccumulator =
+                keywordAccumulator.get(userId);
+
+        if (userAccumulator == null) return;
+
+        for (String keyword : touchedKeywords) {
+
+            KeywordEmbeddingAccumulator acc = userAccumulator.get(keyword);
+            if (acc == null) continue;
+
+            float[] centroid;
+            synchronized (acc) {
+                long count = acc.getOccurrenceCount();
+                if (count == 0) continue;
+
+                float[] sum = acc.getEmbeddingSum();
+                centroid = new float[sum.length];
+                for (int i = 0; i < sum.length; i++) {
+                    centroid[i] = sum[i] / count;
+                }
+            }
+
+            try {
+                String centroidJson = objectMapper.writeValueAsString(centroid);
+                jedis.hset(redisKey, keyword, centroidJson);
+            } catch (JsonProcessingException e) {
+                log.error("Error while converting centroid for keyword [{}]: {}", keyword, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Computes a phrase's vector on demand from its constituent words'
+     * centroids. Not cached — call this only when a consumer (graph
+     * builder, similarity check) actually needs the vector, since each
+     * call costs one Redis read per distinct word in the phrase.
+     */
+    public float[] getPhraseCentroid(Long userId, String phrase) throws JsonProcessingException {
+
+        String redisKey = "centroids:user:" + userId;
+
+        List<float[]> wordCentroids = new ArrayList<>();
+
+        String redisKeyForGettingKeywords = "phrasesToKeywords:user:" + userId;
+
+        String keyWordJson = jedis.hget(redisKeyForGettingKeywords, phrase);
+
+        List<String> keywords = new ArrayList<>();
+        if (keyWordJson != null) {
+            keywords = objectMapper.readValue(keyWordJson, List.class);
+        }
+
+        for (String word : keywords) {
+            String json = jedis.hget(redisKey, word);
+            if (json == null) continue;
+            wordCentroids.add(objectMapper.readValue(json, float[].class));
+        }
+
+        if (wordCentroids.isEmpty()) return null; // no centroid evidence yet for any word
+
+        return averageVectors(wordCentroids);
+    }
+
+    /**
+     * Normalizes a phrase by applying the same per-word normalization used
+     * for keywords (lowercase, strip non-alphanumeric chars), then rejoining
+     * with single spaces. Reuses normalizeWords so keyword and phrase
+     * normalization can never drift out of sync.
+     *
+     * Blank/empty words (e.g. from punctuation-only tokens) are dropped
+     * rather than left as empty strings, so "WebSocket - handler" doesn't
+     * normalize to "websocket  handler" with a double space.
+     */
+    private String normalizePhrase(String phrase) {
+        if (phrase == null || phrase.isBlank()) return "";
+
+        return Arrays.stream(phrase.trim().split("\\s+"))
+                .map(this::normalizeWords)
+                .filter(w -> !w.isEmpty())
+                .collect(Collectors.joining(" "));
+    }
+
+    /**
+     * Averages a list of equal-length vectors element-wise.
+     *
+     * Assumes all vectors share the same dimensionality (true here since
+     * every centroid comes from the same embedding model). Throws if the
+     * list is empty — callers (e.g. getPhraseCentroid) must check for that
+     * before calling, since "average of nothing" has no sensible vector
+     * result and silently returning a zero-vector would be misleading
+     * (indistinguishable from a real centroid that happens to sum near zero).
+     */
+    private float[] averageVectors(List<float[]> vectors) {
+        if (vectors == null || vectors.isEmpty()) {
+            throw new IllegalArgumentException("Cannot average an empty list of vectors");
+        }
+
+        int dim = vectors.getFirst().length;
+        float[] sum = new float[dim];
+
+        for (float[] v : vectors) {
+            if (v.length != dim) {
+                throw new IllegalArgumentException(
+                        "Vector dimension mismatch: expected " + dim + " but got " + v.length
+                );
+            }
+            for (int i = 0; i < dim; i++) {
+                sum[i] += v[i];
+            }
+        }
+
+        for (int i = 0; i < dim; i++) {
+            sum[i] /= vectors.size();
+        }
+
+        return sum;
     }
 }

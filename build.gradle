@@ -32,7 +32,7 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-data-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-web'
-    implementation 'com.NeuroIndex:entity:0.0.2-SNAPSHOT'
+    implementation 'com.NeuroIndex:entity:0.0.4-SNAPSHOT'
     implementation 'org.springframework.ai:spring-ai-starter-model-ollama'
     implementation 'com.pgvector:pgvector:0.1.6'
 	compileOnly 'org.projectlombok:lombok'
@@ -43,6 +43,11 @@ dependencies {
     implementation("org.apache.lucene:lucene-core:10.4.0")
     // Source: https://mvnrepository.com/artifact/org.apache.lucene/lucene-queryparser
     implementation("org.apache.lucene:lucene-queryparser:10.4.0")
+    // Source: https://mvnrepository.com/artifact/org.apache.lucene/lucene-analysis-common
+    implementation("org.apache.lucene:lucene-analysis-common:10.4.0")
+    implementation 'org.apache.opennlp:opennlp-tools:2.5.5'
+    // Source: https://mvnrepository.com/artifact/redis.clients/jedis
+    implementation("redis.clients:jedis:7.5.2")
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 //	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
 	testCompileOnly 'org.projectlombok:lombok'
