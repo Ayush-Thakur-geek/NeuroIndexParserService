@@ -1,10 +1,13 @@
 package com.NeuroIndex.parser.service.impl;
 
 import com.NeuroIndex.entity.domainObjects.SemanticUnit;
-import com.NeuroIndex.entity.models.*;
-import com.NeuroIndex.parser.dtos.SearchResponseDTO;
+import com.NeuroIndex.entity.models.SemanticEdge;
+import com.NeuroIndex.entity.models.SemanticFragmentNode;
+import com.NeuroIndex.entity.models.SemanticNode;
 import com.NeuroIndex.parser.helperClasses.SearchJobStore;
-import com.NeuroIndex.parser.repositories.*;
+import com.NeuroIndex.parser.repositories.SemanticEdgeRepo;
+import com.NeuroIndex.parser.repositories.SemanticFragmentNodeRepo;
+import com.NeuroIndex.parser.repositories.SemanticFragmentRepo;
 import com.NeuroIndex.parser.service.SearchService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
@@ -17,20 +20,20 @@ import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.StoredFields;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.*;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.http.HttpStatus;
 import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
-
-import java.util.UUID;
-import java.util.function.Supplier;
 
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.*;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 @Service
@@ -45,10 +48,9 @@ public class SearchServiceImpl implements SearchService {
 
     private static final int SEARCH_RESULT_LIMIT = 20;
     private static final int DB_BATCH_SIZE = 500;
-    private static final double TEMPERATURE = 0.5;
-    private static final int TOP_RESULT_PERCENT = 40;
+    private static final double TEMPERATURE = 0.4;
+    private static final int TOP_RESULT_PERCENT = 50;
     private final SemanticFragmentNodeRepo semanticFragmentNodeRepo;
-    private final SemanticNodeRepo semanticNodeRepo;
     private final SemanticEdgeRepo semanticEdgeRepo;
     private static final int DEPTH = 3;
     private static final int MAX_GRAPH_NODES = 1_000;

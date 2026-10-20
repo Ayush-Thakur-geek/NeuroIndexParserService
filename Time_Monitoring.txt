@@ -1,10 +1,60 @@
-SearchController.semanticSearch(..) took 2060 ms 
+SearchController.semanticSearch(..) took 699 ms
 
-SearchController.fastSearch(..) took 646 ms 
+SearchController.fastSearch(..) took 2542 ms 
 
-SearchController.semanticSearch(..) took 269 ms 
+SearchController.refinement(..) took 5 ms 
 
-SearchController.fastSearch(..) took 174 ms
+SearchController.semanticSearch(..) took 2932 ms 
+
+SearchController.fastSearch(..) took 702 ms 
+
+SearchController.refinement(..) took 0 ms 
+
+SearchController.semanticSearch(..) took 5176 ms 
+
+SearchController.fastSearch(..) took 461 ms 
+
+SearchController.refinement(..) took 1 ms 
+
+SearchController.semanticSearch(..) took 3005 ms 
+
+SearchController.fastSearch(..) took 484 ms 
+
+SearchController.refinement(..) took 0 ms
+
+SearchController.semanticSearch(..) took 267 ms 
+
+SearchController.fastSearch(..) took 77 ms 
+
+SearchController.refinement(..) took 0 ms 
+
+SearchController.semanticSearch(..) took 1279 ms 
+
+SearchController.fastSearch(..) took 116 ms 
+
+SearchController.refinement(..) took 0 ms 
+
+SearchController.semanticSearch(..) took 1143 ms 
+
+SearchController.fastSearch(..) took 80 ms 
+
+SearchController.refinement(..) took 0 ms
+
+SearchController.semanticSearch(..) took 202 ms 
+
+SearchController.fastSearch(..) took 79 ms 
+
+SearchController.refinement(..) took 0 ms 
+
+SearchController.semanticSearch(..) took 1178 ms
+
+SearchController.fastSearch(..) took 44 ms 
+
+SearchController.refinement(..) took 0 ms 
+
+SearchController.semanticSearch(..) took 1203 ms 
+
+SearchController.fastSearch(..) took 112 ms 
 
 SearchController.refinement(..) took 0 ms 
 
