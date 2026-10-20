@@ -274,7 +274,7 @@ The system combines established information-retrieval methods with application-s
 Term frequency measures how often a term occurs in a document or fragment. A basic form is:
 
 $$
-\operatorname{tf}(t,d) = f_{t,d}
+\mathrm{tf}(t,d) = f_{t,d}
 $$
 
 where $f_{t,d}$ is the count of term $t$ in fragment $d$.
@@ -286,13 +286,13 @@ where $f_{t,d}$ is the count of term $t$ in fragment $d$.
 IDF reduces the importance of terms that occur in many documents and gives more weight to terms that are comparatively rare. A common smoothed definition is:
 
 $$
-\operatorname{idf}(t) = \log\frac{N+1}{\operatorname{df}(t)+1}
+\mathrm{idf}(t) = \log\frac{N+1}{\mathrm{df}(t)+1}
 $$
 
 where:
 
 - $N$ is the number of indexed documents/fragments.
-- $\operatorname{df}(t)$ is the number of documents/fragments containing $t$.
+- $\mathrm{df}(t)$ is the number of documents/fragments containing $t$.
 
 **Why it matters:** a technical identifier appearing in a few fragments can be more discriminative than a generic term appearing everywhere.
 
@@ -303,7 +303,7 @@ Different systems use different smoothing conventions. The formula above is illu
 TF–IDF combines local frequency with global rarity:
 
 $$
-\operatorname{tfidf}(t,d) = \operatorname{tf}(t,d) \cdot \operatorname{idf}(t)
+\mathrm{tfidf}(t,d) = \mathrm{tf}(t,d) \cdot \mathrm{idf}(t)
 $$
 
 **Role in NeuroIndex:** TF and IDF statistics help assess which terms are informative enough to represent a fragment or phrase. The actual keyword scoring pipeline also uses BM25-style scoring, rather than treating this simplified product as the only ranking function.
@@ -313,21 +313,21 @@ $$
 BM25 is a probabilistic information-retrieval ranking function that balances term frequency, inverse document frequency, and document-length normalization. A common form is:
 
 $$
-\operatorname{BM25}(d,q) = \sum_{t \in q} \operatorname{IDF}(t) \cdot \frac{f(t,d)\,(k_1 + 1)}{f(t,d) + k_1 \left(1 - b + b \cdot \dfrac{|d|}{\operatorname{avgdl}}\right)}
+\mathrm{BM25}(d,q) = \sum_{t \in q} \mathrm{IDF}(t) \cdot \frac{f(t,d)\,(k_1 + 1)}{f(t,d) + k_1 \left(1 - b + b \cdot \dfrac{|d|}{\mathrm{avgdl}}\right)}
 $$
 
 where:
 
 - $f(t,d)$ is the frequency of term $t$ in document $d$.
 - $|d|$ is the document length.
-- $\operatorname{avgdl}$ is the average document length.
+- $\mathrm{avgdl}$ is the average document length.
 - $k_1$ controls term-frequency saturation.
 - $b$ controls document-length normalization.
 
 A commonly used IDF variant (the one used by Lucene) is:
 
 $$
-\operatorname{IDF}(t) = \log\left(1 + \frac{N - \operatorname{df}(t) + 0.5}{\operatorname{df}(t) + 0.5}\right)
+\mathrm{IDF}(t) = \log\left(1 + \frac{N - \mathrm{df}(t) + 0.5}{\mathrm{df}(t) + 0.5}\right)
 $$
 
 **Why it matters:** repeating a term should help, but not without limit. Length normalization also prevents long fragments from winning solely because they contain more text. BM25 is used in NeuroIndex's lexical scoring and keyword-selection work.
@@ -365,13 +365,13 @@ where $\mathbf{v}_i$ are the vectors being aggregated.
 Pointwise mutual information compares the observed joint probability of two events with the probability expected if they were independent:
 
 $$
-\operatorname{PMI}(x,y) = \log\frac{P(x,y)}{P(x)\,P(y)}
+\mathrm{PMI}(x,y) = \log\frac{P(x,y)}{P(x)\,P(y)}
 $$
 
 Normalized PMI is commonly defined as:
 
 $$
-\operatorname{NPMI}(x,y) = \frac{\operatorname{PMI}(x,y)}{-\log P(x,y)}
+\mathrm{NPMI}(x,y) = \frac{\mathrm{PMI}(x,y)}{-\log P(x,y)}
 $$
 
 For valid co-occurrence probabilities, NPMI is generally bounded between $-1$ and $1$, subject to the treatment of zero counts and edge cases.
@@ -385,10 +385,10 @@ For valid co-occurrence probabilities, NPMI is generally bounded between $-1$ an
 RRF combines multiple ranked result lists without requiring their raw scores to be on the same scale:
 
 $$
-\operatorname{RRF}(d) = \sum_{r \in R} \frac{1}{k + \operatorname{rank}_r(d)}
+\mathrm{RRF}(d) = \sum_{r \in R} \frac{1}{k + \mathrm{rank}_r(d)}
 $$
 
-where $R$ is the set of ranking lists, $\operatorname{rank}_r(d)$ is the rank of document $d$ in list $r$, and $k$ is a smoothing constant. The original paper uses $k = 60$ in its experiments.
+where $R$ is the set of ranking lists, $\mathrm{rank}_r(d)$ is the rank of document $d$ in list $r$, and $k$ is a smoothing constant. The original paper uses $k = 60$ in its experiments.
 
 **Why it matters:** BM25 scores and vector-similarity scores have different scales. RRF combines their ordering signals instead of naively adding incomparable raw scores.
 
@@ -399,16 +399,16 @@ where $R$ is the set of ranking lists, $\operatorname{rank}_r(d)$ is the rank of
 The evaluation metric used in the benchmark section below:
 
 $$
-\operatorname{MRR@}k = \frac{1}{|Q|} \sum_{i=1}^{|Q|} RR_i,
+\mathrm{MRR@}k = \frac{1}{|Q|} \sum_{i=1}^{|Q|} RR_i,
 \qquad
 RR_i =
 \begin{cases}
-\dfrac{1}{\operatorname{rank}_i} & \text{if the first relevant result has } \operatorname{rank}_i \le k \\[2ex]
+\dfrac{1}{\mathrm{rank}_i} & \text{if the first relevant result has } \mathrm{rank}_i \le k \\[2ex]
 0 & \text{otherwise}
 \end{cases}
 $$
 
-where $Q$ is the set of evaluation queries and $\operatorname{rank}_i$ is the position of the first relevant result for query $i$.
+where $Q$ is the set of evaluation queries and $\mathrm{rank}_i$ is the position of the first relevant result for query $i$.
 
 ### 10. Score-distribution-based candidate selection
 
